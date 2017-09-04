@@ -16,6 +16,7 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
+use cell::UnsafeCell;
 use cmp;
 use hash::Hash;
 use hash::Hasher;
@@ -36,7 +37,7 @@ use hash::Hasher;
 ///
 /// [`Rc`]: ../../std/rc/struct.Rc.html
 /// [arc]: ../../std/sync/struct.Arc.html
-/// [ub]: ../../reference.html#behavior-considered-undefined
+/// [ub]: ../../reference/behavior-considered-undefined.html
 #[stable(feature = "rust1", since = "1.0.0")]
 #[lang = "send"]
 #[rustc_on_unimplemented = "`{Self}` cannot be sent between threads safely"]
@@ -84,7 +85,7 @@ impl<T: ?Sized> !Send for *mut T { }
 ///                         // be made into an object
 /// ```
 ///
-/// [trait object]: ../../book/trait-objects.html
+/// [trait object]: ../../book/first-edition/trait-objects.html
 #[stable(feature = "rust1", since = "1.0.0")]
 #[lang = "sized"]
 #[rustc_on_unimplemented = "`{Self}` does not have a constant size known at compile-time"]
@@ -119,7 +120,7 @@ pub trait Sized {
 /// [coerceunsized]: ../ops/trait.CoerceUnsized.html
 /// [rc]: ../../std/rc/struct.Rc.html
 /// [RFC982]: https://github.com/rust-lang/rfcs/blob/master/text/0982-dst-coercion.md
-
+/// [nomicon-coerce]: ../../nomicon/coercions.html
 #[unstable(feature = "unsize", issue = "27732")]
 #[lang="unsize"]
 pub trait Unsize<T: ?Sized> {
@@ -204,7 +205,7 @@ pub trait Unsize<T: ?Sized> {
 /// but not `Copy`.
 ///
 /// [`Clone`] is a supertrait of `Copy`, so everything which is `Copy` must also implement
-/// [`Clone`]. If a type is `Copy` then its [`Clone`] implementation need only return `*self`
+/// [`Clone`]. If a type is `Copy` then its [`Clone`] implementation only needs to return `*self`
 /// (see the example above).
 ///
 /// ## When can my type be `Copy`?
@@ -245,7 +246,7 @@ pub trait Unsize<T: ?Sized> {
 /// [`String`]'s buffer, leading to a double free.
 ///
 /// Generalizing the latter case, any type implementing [`Drop`] can't be `Copy`, because it's
-/// managing some resource besides its own [`size_of::<T>()`] bytes.
+/// managing some resource besides its own [`size_of::<T>`] bytes.
 ///
 /// If you try to implement `Copy` on a struct or enum containing non-`Copy` data, you will get
 /// the error [E0204].
@@ -262,7 +263,7 @@ pub trait Unsize<T: ?Sized> {
 /// [`Vec<T>`]: ../../std/vec/struct.Vec.html
 /// [`String`]: ../../std/string/struct.String.html
 /// [`Drop`]: ../../std/ops/trait.Drop.html
-/// [`size_of::<T>()`]: ../../std/mem/fn.size_of.html
+/// [`size_of::<T>`]: ../../std/mem/fn.size_of.html
 /// [`Clone`]: ../clone/trait.Clone.html
 /// [`String`]: ../../std/string/struct.String.html
 /// [`i32`]: ../../std/primitive.i32.html
@@ -338,7 +339,7 @@ pub trait Copy : Clone {
 /// [mutex]: ../../std/sync/struct.Mutex.html
 /// [rwlock]: ../../std/sync/struct.RwLock.html
 /// [unsafecell]: ../cell/struct.UnsafeCell.html
-/// [ub]: ../../reference.html#behavior-considered-undefined
+/// [ub]: ../../reference/behavior-considered-undefined.html
 /// [transmute]: ../../std/mem/fn.transmute.html
 #[stable(feature = "rust1", since = "1.0.0")]
 #[lang = "sync"]
@@ -433,7 +434,7 @@ macro_rules! impls{
 /// example, here is a struct `Slice` that has two pointers of type `*const T`,
 /// presumably pointing into an array somewhere:
 ///
-/// ```ignore
+/// ```compile_fail,E0392
 /// struct Slice<'a, T> {
 ///     start: *const T,
 ///     end: *const T,
@@ -492,7 +493,7 @@ macro_rules! impls{
 /// types. We track the Rust type using a phantom type parameter on
 /// the struct `ExternalResource` which wraps a handle.
 ///
-/// [FFI]: ../../book/ffi.html
+/// [FFI]: ../../book/first-edition/ffi.html
 ///
 /// ```
 /// # #![allow(dead_code)]
@@ -553,3 +554,19 @@ mod impls {
     #[stable(feature = "rust1", since = "1.0.0")]
     unsafe impl<'a, T: Send + ?Sized> Send for &'a mut T {}
 }
+
+/// Compiler-internal trait used to determine whether a type contains
+/// any `UnsafeCell` internally, but not through an indirection.
+/// This affects, for example, whether a `static` of that type is
+/// placed in read-only static memory or writable static memory.
+#[lang = "freeze"]
+unsafe trait Freeze {}
+
+unsafe impl Freeze for .. {}
+
+impl<T: ?Sized> !Freeze for UnsafeCell<T> {}
+unsafe impl<T: ?Sized> Freeze for PhantomData<T> {}
+unsafe impl<T: ?Sized> Freeze for *const T {}
+unsafe impl<T: ?Sized> Freeze for *mut T {}
+unsafe impl<'a, T: ?Sized> Freeze for &'a T {}
+unsafe impl<'a, T: ?Sized> Freeze for &'a mut T {}

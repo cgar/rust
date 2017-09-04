@@ -36,15 +36,9 @@ impl<'a> AstValidator<'a> {
         &self.session.parse_sess.span_diagnostic
     }
 
-    fn check_label(&self, label: Ident, span: Span, id: NodeId) {
-        if label.name == keywords::StaticLifetime.name() {
+    fn check_label(&self, label: Ident, span: Span) {
+        if label.name == keywords::StaticLifetime.name() || label.name == "'_" {
             self.err_handler().span_err(span, &format!("invalid label name `{}`", label.name));
-        }
-        if label.name == "'_" {
-            self.session.add_lint(lint::builtin::LIFETIME_UNDERSCORE,
-                                  id,
-                                  span,
-                                  format!("invalid label name `{}`", label.name));
         }
     }
 
@@ -55,7 +49,7 @@ impl<'a> AstValidator<'a> {
                                            E0449,
                                            "unnecessary visibility qualifier");
             if vis == &Visibility::Public {
-                err.span_label(span, &format!("`pub` not needed here"));
+                err.span_label(span, "`pub` not needed here");
             }
             if let Some(note) = note {
                 err.note(note);
@@ -80,7 +74,7 @@ impl<'a> AstValidator<'a> {
             Constness::Const => {
                 struct_span_err!(self.session, constness.span, E0379,
                                  "trait fns cannot be declared const")
-                    .span_label(constness.span, &format!("trait fns cannot be const"))
+                    .span_label(constness.span, "trait fns cannot be const")
                     .emit();
             }
             _ => {}
@@ -99,15 +93,38 @@ impl<'a> AstValidator<'a> {
             }
         }
     }
+
+    /// matches '-' lit | lit (cf. parser::Parser::parse_pat_literal_maybe_minus),
+    /// or path for ranges.
+    ///
+    /// FIXME: do we want to allow expr -> pattern conversion to create path expressions?
+    /// That means making this work:
+    ///
+    /// ```rust,ignore (FIXME)
+    ///     struct S;
+    ///     macro_rules! m {
+    ///         ($a:expr) => {
+    ///             let $a = S;
+    ///         }
+    ///     }
+    ///     m!(S);
+    /// ```
+    fn check_expr_within_pat(&self, expr: &Expr, allow_paths: bool) {
+        match expr.node {
+            ExprKind::Lit(..) => {}
+            ExprKind::Path(..) if allow_paths => {}
+            ExprKind::Unary(UnOp::Neg, ref inner)
+                if match inner.node { ExprKind::Lit(_) => true, _ => false } => {}
+            _ => self.err_handler().span_err(expr.span, "arbitrary expressions aren't allowed \
+                                                         in patterns")
+        }
+    }
 }
 
 impl<'a> Visitor<'a> for AstValidator<'a> {
     fn visit_lifetime(&mut self, lt: &'a Lifetime) {
-        if lt.name == "'_" {
-            self.session.add_lint(lint::builtin::LIFETIME_UNDERSCORE,
-                                  lt.id,
-                                  lt.span,
-                                  format!("invalid lifetime name `{}`", lt.name));
+        if lt.ident.name == "'_" {
+            self.err_handler().span_err(lt.span, &format!("invalid lifetime name `{}`", lt.ident));
         }
 
         visit::walk_lifetime(self, lt)
@@ -121,7 +138,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
             ExprKind::ForLoop(.., Some(ident)) |
             ExprKind::Break(Some(ident), _) |
             ExprKind::Continue(Some(ident)) => {
-                self.check_label(ident.node, ident.span, expr.id);
+                self.check_label(ident.node, ident.span);
             }
             _ => {}
         }
@@ -169,14 +186,12 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
         visit::walk_ty(self, ty)
     }
 
-    fn visit_path(&mut self, path: &'a Path, id: NodeId) {
+    fn visit_path(&mut self, path: &'a Path, _: NodeId) {
         if path.segments.len() >= 2 && path.is_global() {
             let ident = path.segments[1].identifier;
             if token::Ident(ident).is_path_segment_keyword() {
-                self.session.add_lint(lint::builtin::SUPER_OR_SELF_IN_GLOBAL_PATH,
-                                      id,
-                                      path.span,
-                                      format!("global paths cannot start with `{}`", ident));
+                self.err_handler()
+                    .span_err(path.span, &format!("global paths cannot start with `{}`", ident));
             }
         }
 
@@ -187,10 +202,10 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
         match item.node {
             ItemKind::Use(ref view_path) => {
                 let path = view_path.node.path();
-                if path.segments.iter().any(|segment| segment.parameters.is_some()) {
-                    self.err_handler()
-                        .span_err(path.span, "type or lifetime parameters in import path");
-                }
+                path.segments.iter().find(|segment| segment.parameters.is_some()).map(|segment| {
+                    self.err_handler().span_err(segment.parameters.as_ref().unwrap().span(),
+                                                "generic arguments in import path");
+                });
             }
             ItemKind::Impl(.., Some(..), _, ref impl_items) => {
                 self.invalid_visibility(&item.vis, item.span, None);
@@ -229,10 +244,11 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
                         self.check_trait_fn_not_const(sig.constness);
                         if block.is_none() {
                             self.check_decl_no_pat(&sig.decl, |span, _| {
-                                self.session.add_lint(lint::builtin::PATTERNS_IN_FNS_WITHOUT_BODY,
-                                                      trait_item.id, span,
-                                                      "patterns aren't allowed in methods \
-                                                       without bodies".to_string());
+                                self.session.buffer_lint(
+                                    lint::builtin::PATTERNS_IN_FNS_WITHOUT_BODY,
+                                    trait_item.id, span,
+                                    "patterns aren't allowed in methods \
+                                     without bodies");
                             });
                         }
                     }
@@ -241,12 +257,10 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
             ItemKind::Mod(_) => {
                 // Ensure that `path` attributes on modules are recorded as used (c.f. #35584).
                 attr::first_attr_value_str_by_name(&item.attrs, "path");
-                if let Some(attr) =
-                        item.attrs.iter().find(|attr| attr.name() == "warn_directory_ownership") {
+                if item.attrs.iter().any(|attr| attr.check_name("warn_directory_ownership")) {
                     let lint = lint::builtin::LEGACY_DIRECTORY_OWNERSHIP;
                     let msg = "cannot declare a new module at this location";
-                    self.session.add_lint(lint, item.id, item.span, msg.to_string());
-                    attr::mark_used(attr);
+                    self.session.buffer_lint(lint, item.id, item.span, msg);
                 }
             }
             ItemKind::Union(ref vdata, _) => {
@@ -274,7 +288,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
                                                    E0130,
                                                    "patterns aren't allowed in foreign function \
                                                     declarations");
-                    err.span_label(span, &format!("pattern not allowed in foreign function"));
+                    err.span_label(span, "pattern not allowed in foreign function");
                     if is_recent {
                         err.span_note(span,
                                       "this is a recent error, see issue #35203 for more details");
@@ -291,10 +305,10 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
     fn visit_vis(&mut self, vis: &'a Visibility) {
         match *vis {
             Visibility::Restricted { ref path, .. } => {
-                if !path.segments.iter().all(|segment| segment.parameters.is_none()) {
-                    self.err_handler()
-                        .span_err(path.span, "type or lifetime parameters in visibility path");
-                }
+                path.segments.iter().find(|segment| segment.parameters.is_some()).map(|segment| {
+                    self.err_handler().span_err(segment.parameters.as_ref().unwrap().span(),
+                                                "generic arguments in visibility path");
+                });
             }
             _ => {}
         }
@@ -320,6 +334,21 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
             }
         }
         visit::walk_generics(self, g)
+    }
+
+    fn visit_pat(&mut self, pat: &'a Pat) {
+        match pat.node {
+            PatKind::Lit(ref expr) => {
+                self.check_expr_within_pat(expr, false);
+            }
+            PatKind::Range(ref start, ref end, _) => {
+                self.check_expr_within_pat(start, true);
+                self.check_expr_within_pat(end, true);
+            }
+            _ => {}
+        }
+
+        visit::walk_pat(self, pat)
     }
 }
 

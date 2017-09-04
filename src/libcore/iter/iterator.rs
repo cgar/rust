@@ -11,7 +11,7 @@
 use cmp::Ordering;
 
 use super::{Chain, Cycle, Cloned, Enumerate, Filter, FilterMap, FlatMap, Fuse};
-use super::{Inspect, Map, Peekable, Scan, Skip, SkipWhile, Take, TakeWhile, Rev};
+use super::{Inspect, Map, Peekable, Scan, Skip, SkipWhile, StepBy, Take, TakeWhile, Rev};
 use super::{Zip, Sum, Product};
 use super::{ChainState, FromIterator, ZipImpl};
 
@@ -119,7 +119,7 @@ pub trait Iterator {
     /// // exactly wouldn't be possible without executing filter().
     /// assert_eq!((0, Some(10)), iter.size_hint());
     ///
-    /// // Let's add one five more numbers with chain()
+    /// // Let's add five more numbers with chain()
     /// let iter = (0..10).filter(|x| x % 2 == 0).chain(15..20);
     ///
     /// // now both bounds are increased by five
@@ -130,9 +130,10 @@ pub trait Iterator {
     ///
     /// ```
     /// // an infinite iterator has no upper bound
+    /// // and the maximum possible lower bound
     /// let iter = 0..;
     ///
-    /// assert_eq!((0, None), iter.size_hint());
+    /// assert_eq!((usize::max_value(), None), iter.size_hint());
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -140,11 +141,11 @@ pub trait Iterator {
 
     /// Consumes the iterator, counting the number of iterations and returning it.
     ///
-    /// This method will evaluate the iterator until its [`next()`] returns
+    /// This method will evaluate the iterator until its [`next`] returns
     /// [`None`]. Once [`None`] is encountered, `count()` returns the number of
-    /// times it called [`next()`].
+    /// times it called [`next`].
     ///
-    /// [`next()`]: #tymethod.next
+    /// [`next`]: #tymethod.next
     /// [`None`]: ../../std/option/enum.Option.html#variant.None
     ///
     /// # Overflow Behavior
@@ -258,6 +259,39 @@ pub trait Iterator {
         None
     }
 
+    /// Creates an iterator starting at the same point, but stepping by
+    /// the given amount at each iteration.
+    ///
+    /// Note that it will always return the first element of the iterator,
+    /// regardless of the step given.
+    ///
+    /// # Panics
+    ///
+    /// The method will panic if the given step is `0`.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// #![feature(iterator_step_by)]
+    /// let a = [0, 1, 2, 3, 4, 5];
+    /// let mut iter = a.into_iter().step_by(2);
+    ///
+    /// assert_eq!(iter.next(), Some(&0));
+    /// assert_eq!(iter.next(), Some(&2));
+    /// assert_eq!(iter.next(), Some(&4));
+    /// assert_eq!(iter.next(), None);
+    /// ```
+    #[inline]
+    #[unstable(feature = "iterator_step_by",
+               reason = "unstable replacement of Range::step_by",
+               issue = "27741")]
+    fn step_by(self, step: usize) -> StepBy<Self> where Self: Sized {
+        assert!(step != 0);
+        StepBy{iter: self, step: step - 1, first_take: true}
+    }
+
     /// Takes two iterators and creates a new iterator over both in sequence.
     ///
     /// `chain()` will return a new iterator which will first iterate over
@@ -323,7 +357,7 @@ pub trait Iterator {
     ///
     /// In other words, it zips two iterators together, into a single one.
     ///
-    /// When either iterator returns [`None`], all further calls to [`next()`]
+    /// When either iterator returns [`None`], all further calls to [`next`]
     /// will return [`None`].
     ///
     /// # Examples
@@ -364,7 +398,7 @@ pub trait Iterator {
     ///
     /// `zip()` is often used to zip an infinite iterator to a finite one.
     /// This works because the finite iterator will eventually return [`None`],
-    /// ending the zipper. Zipping with `(0..)` can look a lot like [`enumerate()`]:
+    /// ending the zipper. Zipping with `(0..)` can look a lot like [`enumerate`]:
     ///
     /// ```
     /// let enumerate: Vec<_> = "foo".chars().enumerate().collect();
@@ -381,8 +415,8 @@ pub trait Iterator {
     /// assert_eq!((2, 'o'), zipper[2]);
     /// ```
     ///
-    /// [`enumerate()`]: trait.Iterator.html#method.enumerate
-    /// [`next()`]: ../../std/iter/trait.Iterator.html#tymethod.next
+    /// [`enumerate`]: trait.Iterator.html#method.enumerate
+    /// [`next`]: ../../std/iter/trait.Iterator.html#tymethod.next
     /// [`None`]: ../../std/option/enum.Option.html#variant.None
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -409,7 +443,7 @@ pub trait Iterator {
     /// If you're doing some sort of looping for a side effect, it's considered
     /// more idiomatic to use [`for`] than `map()`.
     ///
-    /// [`for`]: ../../book/loops.html#for
+    /// [`for`]: ../../book/first-edition/loops.html#for
     ///
     /// # Examples
     ///
@@ -446,6 +480,53 @@ pub trait Iterator {
         Self: Sized, F: FnMut(Self::Item) -> B,
     {
         Map{iter: self, f: f}
+    }
+
+    /// Calls a closure on each element of an iterator.
+    ///
+    /// This is equivalent to using a [`for`] loop on the iterator, although
+    /// `break` and `continue` are not possible from a closure.  It's generally
+    /// more idiomatic to use a `for` loop, but `for_each` may be more legible
+    /// when processing items at the end of longer iterator chains.  In some
+    /// cases `for_each` may also be faster than a loop, because it will use
+    /// internal iteration on adaptors like `Chain`.
+    ///
+    /// [`for`]: ../../book/first-edition/loops.html#for
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// #![feature(iterator_for_each)]
+    ///
+    /// use std::sync::mpsc::channel;
+    ///
+    /// let (tx, rx) = channel();
+    /// (0..5).map(|x| x * 2 + 1)
+    ///       .for_each(move |x| tx.send(x).unwrap());
+    ///
+    /// let v: Vec<_> =  rx.iter().collect();
+    /// assert_eq!(v, vec![1, 3, 5, 7, 9]);
+    /// ```
+    ///
+    /// For such a small example, a `for` loop may be cleaner, but `for_each`
+    /// might be preferable to keep a functional style with longer iterators:
+    ///
+    /// ```
+    /// #![feature(iterator_for_each)]
+    ///
+    /// (0..5).flat_map(|x| x * 100 .. x * 110)
+    ///       .enumerate()
+    ///       .filter(|&(i, x)| (i + x) % 3 == 0)
+    ///       .for_each(|(i, x)| println!("{}:{}", i, x));
+    /// ```
+    #[inline]
+    #[unstable(feature = "iterator_for_each", issue = "42986")]
+    fn for_each<F>(self, mut f: F) where
+        Self: Sized, F: FnMut(Self::Item),
+    {
+        self.fold((), move |(), item| f(item));
     }
 
     /// Creates an iterator which uses a closure to determine if an element
@@ -518,23 +599,23 @@ pub trait Iterator {
 
     /// Creates an iterator that both filters and maps.
     ///
-    /// The closure must return an [`Option<T>`]. `filter_map()` creates an
+    /// The closure must return an [`Option<T>`]. `filter_map` creates an
     /// iterator which calls this closure on each element. If the closure
     /// returns [`Some(element)`][`Some`], then that element is returned. If the
     /// closure returns [`None`], it will try again, and call the closure on the
     /// next element, seeing if it will return [`Some`].
     ///
-    /// Why `filter_map()` and not just [`filter()`].[`map()`]? The key is in this
+    /// Why `filter_map` and not just [`filter`] and [`map`]? The key is in this
     /// part:
     ///
-    /// [`filter()`]: #method.filter
-    /// [`map()`]: #method.map
+    /// [`filter`]: #method.filter
+    /// [`map`]: #method.map
     ///
     /// > If the closure returns [`Some(element)`][`Some`], then that element is returned.
     ///
     /// In other words, it removes the [`Option<T>`] layer automatically. If your
     /// mapping is already returning an [`Option<T>`] and you want to skip over
-    /// [`None`]s, then `filter_map()` is much, much nicer to use.
+    /// [`None`]s, then `filter_map` is much, much nicer to use.
     ///
     /// # Examples
     ///
@@ -550,21 +631,20 @@ pub trait Iterator {
     /// assert_eq!(iter.next(), None);
     /// ```
     ///
-    /// Here's the same example, but with [`filter()`] and [`map()`]:
+    /// Here's the same example, but with [`filter`] and [`map`]:
     ///
     /// ```
     /// let a = ["1", "2", "lol"];
     ///
     /// let mut iter = a.iter()
-    ///                 .map(|s| s.parse().ok())
-    ///                 .filter(|s| s.is_some());
+    ///                 .map(|s| s.parse())
+    ///                 .filter(|s| s.is_ok())
+    ///                 .map(|s| s.unwrap());
     ///
-    /// assert_eq!(iter.next(), Some(Some(1)));
-    /// assert_eq!(iter.next(), Some(Some(2)));
+    /// assert_eq!(iter.next(), Some(1));
+    /// assert_eq!(iter.next(), Some(2));
     /// assert_eq!(iter.next(), None);
     /// ```
-    ///
-    /// There's an extra layer of [`Some`] in there.
     ///
     /// [`Option<T>`]: ../../std/option/enum.Option.html
     /// [`Some`]: ../../std/option/enum.Option.html#variant.Some
@@ -585,7 +665,7 @@ pub trait Iterator {
     /// iterator.
     ///
     /// `enumerate()` keeps its count as a [`usize`]. If you want to count by a
-    /// different sized integer, the [`zip()`] function provides similar
+    /// different sized integer, the [`zip`] function provides similar
     /// functionality.
     ///
     /// # Overflow Behavior
@@ -601,7 +681,7 @@ pub trait Iterator {
     ///
     /// [`usize::MAX`]: ../../std/usize/constant.MAX.html
     /// [`usize`]: ../../std/primitive.usize.html
-    /// [`zip()`]: #method.zip
+    /// [`zip`]: #method.zip
     ///
     /// # Examples
     ///
@@ -624,16 +704,17 @@ pub trait Iterator {
     /// Creates an iterator which can use `peek` to look at the next element of
     /// the iterator without consuming it.
     ///
-    /// Adds a [`peek()`] method to an iterator. See its documentation for
+    /// Adds a [`peek`] method to an iterator. See its documentation for
     /// more information.
     ///
-    /// Note that the underlying iterator is still advanced when [`peek()`] is
+    /// Note that the underlying iterator is still advanced when [`peek`] is
     /// called for the first time: In order to retrieve the next element,
-    /// [`next()`] is called on the underlying iterator, hence any side effects of
-    /// the [`next()`] method will occur.
+    /// [`next`] is called on the underlying iterator, hence any side effects (i.e.
+    /// anything other than fetching the next value) of the [`next`] method
+    /// will occur.
     ///
-    /// [`peek()`]: struct.Peekable.html#method.peek
-    /// [`next()`]: ../../std/iter/trait.Iterator.html#tymethod.next
+    /// [`peek`]: struct.Peekable.html#method.peek
+    /// [`next`]: ../../std/iter/trait.Iterator.html#tymethod.next
     ///
     /// # Examples
     ///
@@ -666,9 +747,9 @@ pub trait Iterator {
         Peekable{iter: self, peeked: None}
     }
 
-    /// Creates an iterator that [`skip()`]s elements based on a predicate.
+    /// Creates an iterator that [`skip`]s elements based on a predicate.
     ///
-    /// [`skip()`]: #method.skip
+    /// [`skip`]: #method.skip
     ///
     /// `skip_while()` takes a closure as an argument. It will call this
     /// closure on each element of the iterator, and ignore elements
@@ -863,10 +944,10 @@ pub trait Iterator {
         Take{iter: self, n: n}
     }
 
-    /// An iterator adaptor similar to [`fold()`] that holds internal state and
+    /// An iterator adaptor similar to [`fold`] that holds internal state and
     /// produces a new iterator.
     ///
-    /// [`fold()`]: #method.fold
+    /// [`fold`]: #method.fold
     ///
     /// `scan()` takes two arguments: an initial value which seeds the internal
     /// state, and a closure with two arguments, the first being a mutable
@@ -910,16 +991,16 @@ pub trait Iterator {
 
     /// Creates an iterator that works like map, but flattens nested structure.
     ///
-    /// The [`map()`] adapter is very useful, but only when the closure
+    /// The [`map`] adapter is very useful, but only when the closure
     /// argument produces values. If it produces an iterator instead, there's
     /// an extra layer of indirection. `flat_map()` will remove this extra layer
     /// on its own.
     ///
-    /// Another way of thinking about `flat_map()`: [`map()`]'s closure returns
+    /// Another way of thinking about `flat_map()`: [`map`]'s closure returns
     /// one item for each element, and `flat_map()`'s closure returns an
     /// iterator for each element.
     ///
-    /// [`map()`]: #method.map
+    /// [`map`]: #method.map
     ///
     /// # Examples
     ///
@@ -1106,7 +1187,7 @@ pub trait Iterator {
     /// library, used in a variety of contexts.
     ///
     /// The most basic pattern in which `collect()` is used is to turn one
-    /// collection into another. You take a collection, call [`iter()`] on it,
+    /// collection into another. You take a collection, call [`iter`] on it,
     /// do a bunch of transformations, and then `collect()` at the end.
     ///
     /// One of the keys to `collect()`'s power is that many things you might
@@ -1166,7 +1247,7 @@ pub trait Iterator {
     /// assert_eq!(vec![2, 4, 6], doubled);
     /// ```
     ///
-    /// Because `collect()` cares about what you're collecting into, you can
+    /// Because `collect()` only cares about what you're collecting into, you can
     /// still use a partial type hint, `_`, with the turbofish:
     ///
     /// ```
@@ -1211,7 +1292,7 @@ pub trait Iterator {
     /// assert_eq!(Ok(vec![1, 3]), result);
     /// ```
     ///
-    /// [`iter()`]: ../../std/iter/trait.Iterator.html#tymethod.next
+    /// [`iter`]: ../../std/iter/trait.Iterator.html#tymethod.next
     /// [`String`]: ../../std/string/struct.String.html
     /// [`char`]: ../../std/primitive.char.html
     /// [`Result`]: ../../std/result/enum.Result.html
@@ -1306,7 +1387,7 @@ pub trait Iterator {
     /// use a `for` loop with a list of things to build up a result. Those
     /// can be turned into `fold()`s:
     ///
-    /// [`for`]: ../../book/loops.html#for
+    /// [`for`]: ../../book/first-edition/loops.html#for
     ///
     /// ```
     /// let numbers = [1, 2, 3, 4, 5];
@@ -1532,14 +1613,18 @@ pub trait Iterator {
     /// Stopping at the first `true`:
     ///
     /// ```
-    /// let a = [1, 2, 3];
+    /// let a = [1, 2, 3, 4];
     ///
     /// let mut iter = a.iter();
     ///
-    /// assert_eq!(iter.position(|&x| x == 2), Some(1));
+    /// assert_eq!(iter.position(|&x| x >= 2), Some(1));
     ///
     /// // we can still use `iter`, as there are more elements.
     /// assert_eq!(iter.next(), Some(&3));
+    ///
+    /// // The returned index depends on iterator state
+    /// assert_eq!(iter.position(|&x| x == 4), Some(0));
+    ///
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -1603,12 +1688,12 @@ pub trait Iterator {
         let mut i = self.len();
 
         while let Some(v) = self.next_back() {
-            if predicate(v) {
-                return Some(i - 1);
-            }
             // No need for an overflow check here, because `ExactSizeIterator`
             // implies that the number of elements fits into a `usize`.
             i -= 1;
+            if predicate(v) {
+                return Some(i);
+            }
         }
         None
     }
@@ -1616,7 +1701,9 @@ pub trait Iterator {
     /// Returns the maximum element of an iterator.
     ///
     /// If several elements are equally maximum, the last element is
-    /// returned.
+    /// returned. If the iterator is empty, [`None`] is returned.
+    ///
+    /// [`None`]: ../../std/option/enum.Option.html#variant.None
     ///
     /// # Examples
     ///
@@ -1624,8 +1711,10 @@ pub trait Iterator {
     ///
     /// ```
     /// let a = [1, 2, 3];
+    /// let b: Vec<u32> = Vec::new();
     ///
     /// assert_eq!(a.iter().max(), Some(&3));
+    /// assert_eq!(b.iter().max(), None);
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -1642,7 +1731,9 @@ pub trait Iterator {
     /// Returns the minimum element of an iterator.
     ///
     /// If several elements are equally minimum, the first element is
-    /// returned.
+    /// returned. If the iterator is empty, [`None`] is returned.
+    ///
+    /// [`None`]: ../../std/option/enum.Option.html#variant.None
     ///
     /// # Examples
     ///
@@ -1650,8 +1741,10 @@ pub trait Iterator {
     ///
     /// ```
     /// let a = [1, 2, 3];
+    /// let b: Vec<u32> = Vec::new();
     ///
     /// assert_eq!(a.iter().min(), Some(&1));
+    /// assert_eq!(b.iter().min(), None);
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -1669,7 +1762,9 @@ pub trait Iterator {
     /// specified function.
     ///
     /// If several elements are equally maximum, the last element is
-    /// returned.
+    /// returned. If the iterator is empty, [`None`] is returned.
+    ///
+    /// [`None`]: ../../std/option/enum.Option.html#variant.None
     ///
     /// # Examples
     ///
@@ -1694,7 +1789,9 @@ pub trait Iterator {
     /// specified comparison function.
     ///
     /// If several elements are equally maximum, the last element is
-    /// returned.
+    /// returned. If the iterator is empty, [`None`] is returned.
+    ///
+    /// [`None`]: ../../std/option/enum.Option.html#variant.None
     ///
     /// # Examples
     ///
@@ -1719,7 +1816,9 @@ pub trait Iterator {
     /// specified function.
     ///
     /// If several elements are equally minimum, the first element is
-    /// returned.
+    /// returned. If the iterator is empty, [`None`] is returned.
+    ///
+    /// [`None`]: ../../std/option/enum.Option.html#variant.None
     ///
     /// # Examples
     ///
@@ -1743,7 +1842,9 @@ pub trait Iterator {
     /// specified comparison function.
     ///
     /// If several elements are equally minimum, the first element is
-    /// returned.
+    /// returned. If the iterator is empty, [`None`] is returned.
+    ///
+    /// [`None`]: ../../std/option/enum.Option.html#variant.None
     ///
     /// # Examples
     ///
@@ -1800,9 +1901,9 @@ pub trait Iterator {
     /// collections: one from the left elements of the pairs, and one
     /// from the right elements.
     ///
-    /// This function is, in some sense, the opposite of [`zip()`].
+    /// This function is, in some sense, the opposite of [`zip`].
     ///
-    /// [`zip()`]: #method.zip
+    /// [`zip`]: #method.zip
     ///
     /// # Examples
     ///
@@ -1833,12 +1934,12 @@ pub trait Iterator {
         (ts, us)
     }
 
-    /// Creates an iterator which [`clone()`]s all of its elements.
+    /// Creates an iterator which [`clone`]s all of its elements.
     ///
     /// This is useful when you have an iterator over `&T`, but you need an
     /// iterator over `T`.
     ///
-    /// [`clone()`]: ../../std/clone/trait.Clone.html#tymethod.clone
+    /// [`clone`]: ../../std/clone/trait.Clone.html#tymethod.clone
     ///
     /// # Examples
     ///
@@ -2144,16 +2245,16 @@ pub trait Iterator {
     }
 }
 
-/// Select an element from an iterator based on the given projection
+/// Select an element from an iterator based on the given "projection"
 /// and "comparison" function.
 ///
 /// This is an idiosyncratic helper to try to factor out the
 /// commonalities of {max,min}{,_by}. In particular, this avoids
 /// having to implement optimizations several times.
 #[inline]
-fn select_fold1<I,B, FProj, FCmp>(mut it: I,
-                                  mut f_proj: FProj,
-                                  mut f_cmp: FCmp) -> Option<(B, I::Item)>
+fn select_fold1<I, B, FProj, FCmp>(mut it: I,
+                                   mut f_proj: FProj,
+                                   mut f_cmp: FCmp) -> Option<(B, I::Item)>
     where I: Iterator,
           FProj: FnMut(&I::Item) -> B,
           FCmp: FnMut(&B, &I::Item, &B, &I::Item) -> bool
@@ -2166,7 +2267,7 @@ fn select_fold1<I,B, FProj, FCmp>(mut it: I,
 
         for x in it {
             let x_p = f_proj(&x);
-            if f_cmp(&sel_p,  &sel, &x_p, &x) {
+            if f_cmp(&sel_p, &sel, &x_p, &x) {
                 sel = x;
                 sel_p = x_p;
             }

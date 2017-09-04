@@ -10,7 +10,7 @@
 
 //! A helper class for dealing with static archives
 
-use std::ffi::{CString, CStr, OsString};
+use std::ffi::{CString, CStr};
 use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -20,6 +20,7 @@ use std::str;
 use libc;
 use llvm::archive_ro::{ArchiveRO, Child};
 use llvm::{self, ArchiveKind};
+use metadata::METADATA_FILENAME;
 use rustc::session::Session;
 
 pub struct ArchiveConfig<'a> {
@@ -27,8 +28,6 @@ pub struct ArchiveConfig<'a> {
     pub dst: PathBuf,
     pub src: Option<PathBuf>,
     pub lib_search_paths: Vec<PathBuf>,
-    pub ar_prog: String,
-    pub command_path: OsString,
 }
 
 /// Helper for adding many files to an archive with a single invocation of
@@ -65,10 +64,10 @@ pub fn find_library(name: &str, search_paths: &[PathBuf], sess: &Session)
 
     for path in search_paths {
         debug!("looking for {} inside {:?}", name, path);
-        let test = path.join(&oslibname[..]);
+        let test = path.join(&oslibname);
         if test.exists() { return test }
         if oslibname != unixlibname {
-            let test = path.join(&unixlibname[..]);
+            let test = path.join(&unixlibname);
             if test.exists() { return test }
         }
     }
@@ -88,7 +87,7 @@ impl<'a> ArchiveBuilder<'a> {
     /// by `config`.
     pub fn new(config: ArchiveConfig<'a>) -> ArchiveBuilder<'a> {
         ArchiveBuilder {
-            config: config,
+            config,
             removals: Vec::new(),
             additions: Vec::new(),
             should_update_symbols: false,
@@ -125,7 +124,7 @@ impl<'a> ArchiveBuilder<'a> {
             Some(ref src) => src,
             None => return None,
         };
-        self.src_archive = Some(ArchiveRO::open(src));
+        self.src_archive = Some(ArchiveRO::open(src).ok());
         self.src_archive.as_ref().unwrap().as_ref()
     }
 
@@ -158,11 +157,9 @@ impl<'a> ArchiveBuilder<'a> {
         // Ignoring all bytecode files, no matter of
         // name
         let bc_ext = ".bytecode.deflate";
-        let metadata_filename =
-            self.config.sess.cstore.metadata_filename().to_owned();
 
         self.add_archive(rlib, move |fname: &str| {
-            if fname.ends_with(bc_ext) || fname == metadata_filename {
+            if fname.ends_with(bc_ext) || fname == METADATA_FILENAME {
                 return true
             }
 
@@ -187,12 +184,11 @@ impl<'a> ArchiveBuilder<'a> {
         where F: FnMut(&str) -> bool + 'static
     {
         let archive = match ArchiveRO::open(archive) {
-            Some(ar) => ar,
-            None => return Err(io::Error::new(io::ErrorKind::Other,
-                                              "failed to open archive")),
+            Ok(ar) => ar,
+            Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
         };
         self.additions.push(Addition::Archive {
-            archive: archive,
+            archive,
             skip: Box::new(skip),
         });
         Ok(())

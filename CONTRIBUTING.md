@@ -97,33 +97,38 @@ system internals, try asking in [`#rust-internals`][pound-rust-internals].
 
 Before you can start building the compiler you need to configure the build for
 your system. In most cases, that will just mean using the defaults provided
-for Rust. Configuring involves invoking the `configure` script in the project
-root.
+for Rust.
 
-```
-./configure
-```
+To change configuration, you must copy the file `config.toml.example`
+to `config.toml` in the directory from which you will be running the build, and
+change the settings provided.
 
-There are large number of options accepted by this script to alter the
-configuration used later in the build process. Some options to note:
+There are large number of options provided in this config file that will alter the
+configuration used in the build process. Some options to note:
 
-- `--enable-debug` - Build a debug version of the compiler (disables optimizations,
-    which speeds up compilation of stage1 rustc)
-- `--enable-optimize` - Enable optimizations (can be used with `--enable-debug`
-    to make a debug build with optimizations)
-- `--disable-valgrind-rpass` - Don't run tests with valgrind
-- `--enable-clang` - Prefer clang to gcc for building dependencies (e.g., LLVM)
-- `--enable-ccache` - Invoke clang/gcc with ccache to re-use object files between builds
-- `--enable-compiler-docs` - Build compiler documentation
+#### `[llvm]`:
+- `ccache = true` - Use ccache when building llvm
 
-To see a full list of options, run `./configure --help`.
+#### `[build]`:
+- `compiler-docs = true` - Build compiler documentation
+
+#### `[rust]`:
+- `debuginfo = true` - Build a compiler with debuginfo
+- `optimize = false` - Disable optimizations to speed up compilation of stage1 rust
+
+For more options, the `config.toml` file contains commented out defaults, with
+descriptions of what each option will do.
+
+Note: Previously the `./configure` script was used to configure this
+project. It can still be used, but it's recommended to use a `config.toml`
+file. If you still have a `config.mk` file in your directory - from
+`./configure` - you may need to delete it for `config.toml` to work.
 
 ### Building
 
-Although the `./configure` script will generate a `Makefile`, this is actually
-just a thin veneer over the actual build system driver, `x.py`. This file, at
-the root of the repository, is used to build, test, and document various parts
-of the compiler. You can execute it as:
+The build system uses the `x.py` script to control the build process. This script
+is used to build, test, and document various parts of the compiler. You can
+execute it as:
 
 ```sh
 python x.py build
@@ -172,7 +177,7 @@ python x.py test src/test/rustdoc
 python x.py build src/libcore --stage 0
 ```
 
-You can explore the build system throught the various `--help` pages for each
+You can explore the build system through the various `--help` pages for each
 subcommand. For example to learn more about a command you can run:
 
 ```
@@ -184,6 +189,9 @@ To learn about all possible rules you can execute, run:
 ```
 python x.py build --help --verbose
 ```
+
+Note: Previously `./configure` and `make` were used to build this project.
+They are still available, but `x.py` is the recommended build system.
 
 ### Useful commands
 
@@ -199,7 +207,7 @@ Some common invocations of `x.py` are:
   This is the fastest way to recompile after you changed only rustc source code.
   Note however that the resulting rustc binary won't have a stdlib to link
   against by default. You can build libstd once with `x.py build src/libstd`,
-  but it is is only guaranteed to work if recompiled, so if there are any issues
+  but it is only guaranteed to work if recompiled, so if there are any issues
   recompile it.
 - `x.py test` - build the full compiler & run all tests (takes a while). This
   is what gets run by the continuous integration system against your pull
@@ -225,18 +233,49 @@ Some common invocations of `x.py` are:
   more than 99 characters in a single line should be kept in mind when writing
   code.
 
+### Using your local build
+
+If you use Rustup to manage your rust install, it has a feature called ["custom
+toolchains"][toolchain-link] that you can use to access your newly-built compiler
+without having to install it to your system or user PATH. If you've run `python
+x.py build`, then you can add your custom rustc to a new toolchain like this:
+
+[toolchain-link]: https://github.com/rust-lang-nursery/rustup.rs#working-with-custom-toolchains-and-local-builds
+
+```
+rustup toolchain link <name> build/<host-triple>/stage2
+```
+
+Where `<host-triple>` is the build triple for the host (the triple of your
+computer, by default), and `<name>` is the name for your custom toolchain. (If you
+added `--stage 1` to your build command, the compiler will be in the `stage1`
+folder instead.) You'll only need to do this once - it will automatically point
+to the latest build you've done.
+
+Once this is set up, you can use your custom toolchain just like any other. For
+example, if you've named your toolchain `local`, running `cargo +local build` will
+compile a project with your custom rustc, setting `rustup override set local` will
+override the toolchain for your current directory, and `cargo +local doc` will use
+your custom rustc and rustdoc to generate docs. (If you do this with a `--stage 1`
+build, you'll need to build rustdoc specially, since it's not normally built in
+stage 1. `python x.py build --stage 1 src/libstd src/tools/rustdoc` will build
+rustdoc and libstd, which will allow rustdoc to be run with that toolchain.)
+
 ## Pull Requests
 
 Pull requests are the primary mechanism we use to change Rust. GitHub itself
-has some [great documentation][pull-requests] on using the Pull Request
-feature. We use the 'fork and pull' model described there.
+has some [great documentation][pull-requests] on using the Pull Request feature.
+We use the "fork and pull" model [described here][development-models], where
+contributors push changes to their personal fork and create pull requests to
+bring those changes into the source repository.
 
-[pull-requests]: https://help.github.com/articles/using-pull-requests/
+[pull-requests]: https://help.github.com/articles/about-pull-requests/
+[development-models]: https://help.github.com/articles/about-collaborative-development-models/
 
 Please make pull requests against the `master` branch.
 
-Compiling all of `make check` can take a while. When testing your pull request,
-consider using one of the more specialized `make` targets to cut down on the
+Compiling all of `./x.py test` can take a while. When testing your pull request,
+consider using one of the more specialized `./x.py` targets to cut down on the
 amount of time you have to wait. You need to have built the compiler at least
 once before running these will work, but that’s only one full build rather than
 one each time.
@@ -280,11 +319,37 @@ been approved. The PR then enters the [merge queue][merge-queue], where @bors
 will run all the tests on every platform we support. If it all works out,
 @bors will merge your code into `master` and close the pull request.
 
-[merge-queue]: https://buildbot.rust-lang.org/homu/queue/rust
+[merge-queue]: https://buildbot2.rust-lang.org/homu/queue/rust
 
 Speaking of tests, Rust has a comprehensive test suite. More information about
 it can be found
 [here](https://github.com/rust-lang/rust-wiki-backup/blob/master/Note-testsuite.md).
+
+### External Dependencies
+
+Currently building Rust will also build the following external projects:
+
+* [clippy](https://github.com/rust-lang-nursery/rust-clippy)
+
+If your changes break one of these projects, you need to fix them by opening
+a pull request against the broken project. When you have opened a pull request,
+you can point the submodule at your pull request by calling
+
+```
+git fetch origin pull/$id_of_your_pr/head:my_pr
+git checkout my_pr
+```
+
+within the submodule's directory. Don't forget to also add your changes with
+
+```
+git add path/to/submodule
+```
+
+outside the submodule.
+
+It can also be more convenient during development to set `submodules = false`
+in the `config.toml` to prevent `x.py` from resetting to the original branch.
 
 ## Writing Documentation
 
@@ -303,11 +368,15 @@ To save @bors some work, and to get small changes through more quickly, when
 the other rollup-eligible patches too, and they'll get tested and merged at
 the same time.
 
-To find documentation-related issues, sort by the [A-docs label][adocs].
+To find documentation-related issues, sort by the [T-doc label][tdoc].
 
-[adocs]: https://github.com/rust-lang/rust/issues?q=is%3Aopen+is%3Aissue+label%3AA-docs
+[tdoc]: https://github.com/rust-lang/rust/issues?q=is%3Aopen%20is%3Aissue%20label%3AT-doc
 
-In many cases, you don't need a full `make doc`. You can use `rustdoc` directly
+You can find documentation style guidelines in [RFC 1574][rfc1574].
+
+[rfc1574]: https://github.com/rust-lang/rfcs/blob/master/text/1574-more-api-documentation-conventions.md#appendix-a-full-conventions-text
+
+In many cases, you don't need a full `./x.py doc`. You can use `rustdoc` directly
 to check small fixes. For example, `rustdoc src/doc/reference.md` will render
 reference to `doc/reference.html`. The CSS might be messed up, but you can
 verify that the HTML is right.
@@ -398,5 +467,5 @@ are:
 [rr]: https://doc.rust-lang.org/book/README.html
 [tlgba]: http://tomlee.co/2014/04/a-more-detailed-tour-of-the-rust-compiler/
 [ro]: http://www.rustaceans.org/
-[rctd]: ./COMPILER_TESTS.md
-[cheatsheet]: https://buildbot.rust-lang.org/homu/
+[rctd]: ./src/test/COMPILER_TESTS.md
+[cheatsheet]: https://buildbot2.rust-lang.org/homu/

@@ -19,11 +19,9 @@ use rustc::mir::{Constant, Literal, Location, LocalDecl};
 use rustc::mir::{Lvalue, LvalueElem, LvalueProjection};
 use rustc::mir::{Mir, Operand, ProjectionElem};
 use rustc::mir::{Rvalue, SourceInfo, Statement, StatementKind};
-use rustc::mir::{Terminator, TerminatorKind, TypedConstVal, VisibilityScope, VisibilityScopeData};
+use rustc::mir::{Terminator, TerminatorKind, VisibilityScope, VisibilityScopeData};
 use rustc::mir::visit as mir_visit;
-use rustc::mir::visit::Visitor;
 use rustc::ty::{ClosureSubsts, TyCtxt};
-use rustc::util::common::to_readable_str;
 use rustc::util::nodemap::{FxHashMap};
 
 struct NodeData {
@@ -34,22 +32,6 @@ struct NodeData {
 struct StatCollector<'a, 'tcx: 'a> {
     _tcx: TyCtxt<'a, 'tcx, 'tcx>,
     data: FxHashMap<&'static str, NodeData>,
-}
-
-pub fn print_mir_stats<'tcx, 'a>(tcx: TyCtxt<'a, 'tcx, 'tcx>, title: &str) {
-    let mut collector = StatCollector {
-        _tcx: tcx,
-        data: FxHashMap(),
-    };
-    // For debugging instrumentation like this, we don't need to worry
-    // about maintaining the dep graph.
-    let _ignore = tcx.dep_graph.in_ignore();
-    let mir_map = tcx.mir_map.borrow();
-    for def_id in mir_map.keys() {
-        let mir = mir_map.get(&def_id).unwrap();
-        collector.visit_mir(&mir.borrow());
-    }
-    collector.print(title);
 }
 
 impl<'a, 'tcx> StatCollector<'a, 'tcx> {
@@ -66,27 +48,6 @@ impl<'a, 'tcx> StatCollector<'a, 'tcx> {
 
     fn record<T>(&mut self, label: &'static str, node: &T) {
         self.record_with_size(label, ::std::mem::size_of_val(node));
-    }
-
-    fn print(&self, title: &str) {
-        let mut stats: Vec<_> = self.data.iter().collect();
-
-        stats.sort_by_key(|&(_, ref d)| d.count * d.size);
-
-        println!("\n{}\n", title);
-
-        println!("{:<32}{:>18}{:>14}{:>14}",
-            "Name", "Accumulated Size", "Count", "Item Size");
-        println!("------------------------------------------------------------------------------");
-
-        for (label, data) in stats {
-            println!("{:<32}{:>18}{:>14}{:>14}",
-                label,
-                to_readable_str(data.count * data.size),
-                to_readable_str(data.count),
-                to_readable_str(data.size));
-        }
-        println!("------------------------------------------------------------------------------");
     }
 }
 
@@ -125,9 +86,12 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
         self.record("Statement", statement);
         self.record(match statement.kind {
             StatementKind::Assign(..) => "StatementKind::Assign",
+            StatementKind::EndRegion(..) => "StatementKind::EndRegion",
+            StatementKind::Validate(..) => "StatementKind::Validate",
             StatementKind::SetDiscriminant { .. } => "StatementKind::SetDiscriminant",
             StatementKind::StorageLive(..) => "StatementKind::StorageLive",
             StatementKind::StorageDead(..) => "StatementKind::StorageDead",
+            StatementKind::InlineAsm { .. } => "StatementKind::InlineAsm",
             StatementKind::Nop => "StatementKind::Nop",
         }, &statement.kind);
         self.super_statement(block, statement, location);
@@ -156,6 +120,8 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
             TerminatorKind::DropAndReplace { .. } => "TerminatorKind::DropAndReplace",
             TerminatorKind::Call { .. } => "TerminatorKind::Call",
             TerminatorKind::Assert { .. } => "TerminatorKind::Assert",
+            TerminatorKind::GeneratorDrop => "TerminatorKind::GeneratorDrop",
+            TerminatorKind::Yield { .. } => "TerminatorKind::Yield",
         }, kind);
         self.super_terminator_kind(block, kind, location);
     }
@@ -167,6 +133,12 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
         self.record(match *msg {
             AssertMessage::BoundsCheck { .. } => "AssertMessage::BoundsCheck",
             AssertMessage::Math(..) => "AssertMessage::Math",
+            AssertMessage::GeneratorResumedAfterReturn => {
+                "AssertMessage::GeneratorResumedAfterReturn"
+            }
+            AssertMessage::GeneratorResumedAfterPanic => {
+                "AssertMessage::GeneratorResumedAfterPanic"
+            }
         }, msg);
         self.super_assert_message(msg, location);
     }
@@ -185,20 +157,20 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
             Rvalue::CheckedBinaryOp(..) => "Rvalue::CheckedBinaryOp",
             Rvalue::UnaryOp(..) => "Rvalue::UnaryOp",
             Rvalue::Discriminant(..) => "Rvalue::Discriminant",
-            Rvalue::Box(..) => "Rvalue::Box",
+            Rvalue::NullaryOp(..) => "Rvalue::NullaryOp",
             Rvalue::Aggregate(ref kind, ref _operands) => {
                 // AggregateKind is not distinguished by visit API, so
                 // record it. (`super_rvalue` handles `_operands`.)
-                self.record(match *kind {
-                    AggregateKind::Array => "AggregateKind::Array",
+                self.record(match **kind {
+                    AggregateKind::Array(_) => "AggregateKind::Array",
                     AggregateKind::Tuple => "AggregateKind::Tuple",
                     AggregateKind::Adt(..) => "AggregateKind::Adt",
                     AggregateKind::Closure(..) => "AggregateKind::Closure",
+                    AggregateKind::Generator(..) => "AggregateKind::Generator",
                 }, kind);
 
                 "Rvalue::Aggregate"
             }
-            Rvalue::InlineAsm { .. } => "Rvalue::InlineAsm",
         };
         self.record(rvalue_kind, rvalue);
         self.super_rvalue(rvalue, location);
@@ -278,7 +250,8 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
     }
 
     fn visit_closure_substs(&mut self,
-                            substs: &ClosureSubsts<'tcx>) {
+                            substs: &ClosureSubsts<'tcx>,
+                            _: Location) {
         self.record("ClosureSubsts", substs);
         self.super_closure_substs(substs);
     }
@@ -295,13 +268,6 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
                          _: Location) {
         self.record("ConstUsize", const_usize);
         self.super_const_usize(const_usize);
-    }
-
-    fn visit_typed_const_val(&mut self,
-                             val: &TypedConstVal<'tcx>,
-                             location: Location) {
-        self.record("TypedConstVal", val);
-        self.super_typed_const_val(val, location);
     }
 
     fn visit_local_decl(&mut self,

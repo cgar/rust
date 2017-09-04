@@ -18,12 +18,12 @@ use {names_to_string, module_to_string};
 use {resolve_error, ResolutionError};
 
 use rustc::ty;
-use rustc::lint::builtin::PRIVATE_IN_PUBLIC;
+use rustc::lint::builtin::PUB_USE_OF_PRIVATE_EXTERN_CRATE;
 use rustc::hir::def_id::DefId;
 use rustc::hir::def::*;
-use rustc::util::nodemap::FxHashSet;
+use rustc::util::nodemap::{FxHashMap, FxHashSet};
 
-use syntax::ast::{Ident, NodeId};
+use syntax::ast::{Ident, SpannedIdent, NodeId};
 use syntax::ext::base::Determinacy::{self, Determined, Undetermined};
 use syntax::ext::hygiene::Mark;
 use syntax::parse::token;
@@ -57,7 +57,7 @@ pub enum ImportDirectiveSubclass<'a> {
 pub struct ImportDirective<'a> {
     pub id: NodeId,
     pub parent: Module<'a>,
-    pub module_path: Vec<Ident>,
+    pub module_path: Vec<SpannedIdent>,
     pub imported_module: Cell<Option<Module<'a>>>, // the resolution of `module_path`
     pub subclass: ImportDirectiveSubclass<'a>,
     pub span: Span,
@@ -134,47 +134,50 @@ impl<'a> NameResolution<'a> {
 impl<'a> Resolver<'a> {
     fn resolution(&self, module: Module<'a>, ident: Ident, ns: Namespace)
                   -> &'a RefCell<NameResolution<'a>> {
-        let ident = ident.unhygienize();
-        *module.resolutions.borrow_mut().entry((ident, ns))
+        *module.resolutions.borrow_mut().entry((ident.modern(), ns))
                .or_insert_with(|| self.arenas.alloc_name_resolution())
     }
 
     /// Attempts to resolve `ident` in namespaces `ns` of `module`.
     /// Invariant: if `record_used` is `Some`, import resolution must be complete.
-    pub fn resolve_ident_in_module(&mut self,
-                                   module: Module<'a>,
-                                   ident: Ident,
-                                   ns: Namespace,
-                                   ignore_unresolved_invocations: bool,
-                                   record_used: Option<Span>)
-                                   -> Result<&'a NameBinding<'a>, Determinacy> {
+    pub fn resolve_ident_in_module_unadjusted(&mut self,
+                                              module: Module<'a>,
+                                              ident: Ident,
+                                              ns: Namespace,
+                                              restricted_shadowing: bool,
+                                              record_used: bool,
+                                              path_span: Span)
+                                              -> Result<&'a NameBinding<'a>, Determinacy> {
         self.populate_module_if_necessary(module);
 
         let resolution = self.resolution(module, ident, ns)
             .try_borrow_mut()
             .map_err(|_| Determined)?; // This happens when there is a cycle of imports
 
-        if let Some(span) = record_used {
+        if record_used {
             if let Some(binding) = resolution.binding {
                 if let Some(shadowed_glob) = resolution.shadows_glob {
                     let name = ident.name;
-                    // If we ignore unresolved invocations, we must forbid
-                    // expanded shadowing to avoid time travel.
-                    if ignore_unresolved_invocations &&
+                    // Forbid expanded shadowing to avoid time travel.
+                    if restricted_shadowing &&
                        binding.expansion != Mark::root() &&
                        ns != MacroNS && // In MacroNS, `try_define` always forbids this shadowing
                        binding.def() != shadowed_glob.def() {
                         self.ambiguity_errors.push(AmbiguityError {
-                            span: span, name: name, lexical: false, b1: binding, b2: shadowed_glob,
+                            span: path_span,
+                            name,
+                            lexical: false,
+                            b1: binding,
+                            b2: shadowed_glob,
                             legacy: false,
                         });
                     }
                 }
-                if self.record_use(ident, ns, binding, span) {
+                if self.record_use(ident, ns, binding, path_span) {
                     return Ok(self.dummy_binding);
                 }
                 if !self.is_accessible(binding.vis) {
-                    self.privacy_errors.push(PrivacyError(span, ident.name, binding));
+                    self.privacy_errors.push(PrivacyError(path_span, ident.name, binding));
                 }
             }
 
@@ -206,7 +209,7 @@ impl<'a> Resolver<'a> {
                     SingleImport { source, .. } => source,
                     _ => unreachable!(),
                 };
-                match self.resolve_ident_in_module(module, ident, ns, false, None) {
+                match self.resolve_ident_in_module(module, ident, ns, false, false, path_span) {
                     Err(Determined) => {}
                     _ => return Err(Undetermined),
                 }
@@ -215,7 +218,7 @@ impl<'a> Resolver<'a> {
         }
 
         let no_unresolved_invocations =
-            ignore_unresolved_invocations || module.unresolved_invocations.borrow().is_empty();
+            restricted_shadowing || module.unresolved_invocations.borrow().is_empty();
         match resolution.binding {
             // In `MacroNS`, expanded bindings do not shadow (enforced in `try_define`).
             Some(binding) if no_unresolved_invocations || ns == MacroNS =>
@@ -225,16 +228,26 @@ impl<'a> Resolver<'a> {
         }
 
         // Check if the globs are determined
+        if restricted_shadowing && module.def().is_some() {
+            return Err(Determined);
+        }
         for directive in module.globs.borrow().iter() {
-            if self.is_accessible(directive.vis.get()) {
-                if let Some(module) = directive.imported_module.get() {
-                    let result = self.resolve_ident_in_module(module, ident, ns, false, None);
-                    if let Err(Undetermined) = result {
-                        return Err(Undetermined);
-                    }
-                } else {
-                    return Err(Undetermined);
-                }
+            if !self.is_accessible(directive.vis.get()) {
+                continue
+            }
+            let module = unwrap_or!(directive.imported_module.get(), return Err(Undetermined));
+            let (orig_current_module, mut ident) = (self.current_module, ident.modern());
+            match ident.ctxt.glob_adjust(module.expansion, directive.span.ctxt().modern()) {
+                Some(Some(def)) => self.current_module = self.macro_def_scope(def),
+                Some(None) => {}
+                None => continue,
+            };
+            let result = self.resolve_ident_in_module_unadjusted(
+                module, ident, ns, false, false, path_span,
+            );
+            self.current_module = orig_current_module;
+            if let Err(Undetermined) = result {
+                return Err(Undetermined);
             }
         }
 
@@ -243,7 +256,7 @@ impl<'a> Resolver<'a> {
 
     // Add an import directive to the current module.
     pub fn add_import_directive(&mut self,
-                                module_path: Vec<Ident>,
+                                module_path: Vec<SpannedIdent>,
                                 subclass: ImportDirectiveSubclass<'a>,
                                 span: Span,
                                 id: NodeId,
@@ -252,13 +265,13 @@ impl<'a> Resolver<'a> {
         let current_module = self.current_module;
         let directive = self.arenas.alloc_import_directive(ImportDirective {
             parent: current_module,
-            module_path: module_path,
+            module_path,
             imported_module: Cell::new(None),
-            subclass: subclass,
-            span: span,
-            id: id,
+            subclass,
+            span,
+            id,
             vis: Cell::new(vis),
-            expansion: expansion,
+            expansion,
             used: Cell::new(false),
         });
 
@@ -283,7 +296,8 @@ impl<'a> Resolver<'a> {
     pub fn import(&self, binding: &'a NameBinding<'a>, directive: &'a ImportDirective<'a>)
                   -> &'a NameBinding<'a> {
         let vis = if binding.pseudo_vis().is_at_least(directive.vis.get(), self) ||
-                     !directive.is_glob() && binding.is_extern_crate() { // c.f. `PRIVATE_IN_PUBLIC`
+                     // c.f. `PUB_USE_OF_PRIVATE_EXTERN_CRATE`
+                     !directive.is_glob() && binding.is_extern_crate() {
             directive.vis.get()
         } else {
             binding.pseudo_vis()
@@ -297,13 +311,13 @@ impl<'a> Resolver<'a> {
 
         self.arenas.alloc_name_binding(NameBinding {
             kind: NameBindingKind::Import {
-                binding: binding,
-                directive: directive,
+                binding,
+                directive,
                 used: Cell::new(false),
                 legacy_self_import: false,
             },
             span: directive.span,
-            vis: vis,
+            vis,
             expansion: directive.expansion,
         })
     }
@@ -365,7 +379,7 @@ impl<'a> Resolver<'a> {
         // Ensure that `resolution` isn't borrowed when defining in the module's glob importers,
         // during which the resolution might end up getting re-defined via a glob cycle.
         let (binding, t) = {
-            let mut resolution = &mut *self.resolution(module, ident, ns).borrow_mut();
+            let resolution = &mut *self.resolution(module, ident, ns).borrow_mut();
             let old_binding = resolution.binding();
 
             let t = f(self, resolution);
@@ -382,7 +396,14 @@ impl<'a> Resolver<'a> {
 
         // Define `binding` in `module`s glob importers.
         for directive in module.glob_importers.borrow_mut().iter() {
-            if self.is_accessible_from(binding.vis, directive.parent) {
+            let mut ident = ident.modern();
+            let scope = match ident.ctxt.reverse_glob_adjust(module.expansion,
+                                                             directive.span.ctxt().modern()) {
+                Some(Some(def)) => self.macro_def_scope(def),
+                Some(None) => directive.parent,
+                None => continue,
+            };
+            if self.is_accessible_from(binding.vis, scope) {
                 let imported_binding = self.import(binding, directive);
                 let _ = self.try_define(directive.parent, ident, ns, imported_binding);
             }
@@ -457,17 +478,33 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
         }
 
         let mut errors = false;
+        let mut seen_spans = FxHashSet();
         for i in 0 .. self.determined_imports.len() {
             let import = self.determined_imports[i];
-            if let Some(err) = self.finalize_import(import) {
+            if let Some((span, err)) = self.finalize_import(import) {
                 errors = true;
+
+                if let SingleImport { source, ref result, .. } = import.subclass {
+                    if source.name == "self" {
+                        // Silence `unresolved import` error if E0429 is already emitted
+                        match result.value_ns.get() {
+                            Err(Determined) => continue,
+                            _ => {},
+                        }
+                    }
+                }
 
                 // If the error is a single failed import then create a "fake" import
                 // resolution for it so that later resolve stages won't complain.
                 self.import_dummy_binding(import);
-                let path = import_path_to_string(&import.module_path, &import.subclass);
-                let error = ResolutionError::UnresolvedImport(Some((&path, &err)));
-                resolve_error(self.resolver, import.span, error);
+                if !seen_spans.contains(&span) {
+                    let path = import_path_to_string(&import.module_path[..],
+                                                     &import.subclass,
+                                                     span);
+                    let error = ResolutionError::UnresolvedImport(Some((span, &path, &err)));
+                    resolve_error(self.resolver, span, error);
+                    seen_spans.insert(span);
+                }
             }
         }
 
@@ -485,7 +522,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
     /// If successful, the resolved bindings are written into the module.
     fn resolve_import(&mut self, directive: &'b ImportDirective<'b>) -> bool {
         debug!("(resolving import for module) resolving import `{}::...` in `{}`",
-               names_to_string(&directive.module_path),
+               names_to_string(&directive.module_path[..]),
                module_to_string(self.current_module));
 
         self.current_module = directive.parent;
@@ -497,7 +534,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
             // For better failure detection, pretend that the import will not define any names
             // while resolving its module path.
             directive.vis.set(ty::Visibility::Invisible);
-            let result = self.resolve_path(&directive.module_path, None, None);
+            let result = self.resolve_path(&directive.module_path[..], None, false, directive.span);
             directive.vis.set(vis);
 
             match result {
@@ -521,7 +558,12 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
         let mut indeterminate = false;
         self.per_ns(|this, ns| if !type_ns_only || ns == TypeNS {
             if let Err(Undetermined) = result[ns].get() {
-                result[ns].set(this.resolve_ident_in_module(module, source, ns, false, None));
+                result[ns].set(this.resolve_ident_in_module(module,
+                                                            source,
+                                                            ns,
+                                                            false,
+                                                            false,
+                                                            directive.span));
             } else {
                 return
             };
@@ -537,7 +579,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
                 Ok(binding) if !binding.is_importable() => {
                     let msg = format!("`{}` is not directly importable", target);
                     struct_span_err!(this.session, directive.span, E0253, "{}", &msg)
-                        .span_label(directive.span, &format!("cannot be imported directly"))
+                        .span_label(directive.span, "cannot be imported directly")
                         .emit();
                     // Do not import this illegal binding. Import a dummy binding and pretend
                     // everything is fine
@@ -557,23 +599,25 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
     }
 
     // If appropriate, returns an error to report.
-    fn finalize_import(&mut self, directive: &'b ImportDirective<'b>) -> Option<String> {
+    fn finalize_import(&mut self, directive: &'b ImportDirective<'b>) -> Option<(Span, String)> {
         self.current_module = directive.parent;
 
         let ImportDirective { ref module_path, span, .. } = *directive;
-        let module_result = self.resolve_path(&module_path, None, Some(span));
+        let module_result = self.resolve_path(&module_path, None, true, span);
         let module = match module_result {
             PathResult::Module(module) => module,
-            PathResult::Failed(msg, _) => {
+            PathResult::Failed(span, msg, _) => {
                 let (mut self_path, mut self_result) = (module_path.clone(), None);
-                if !self_path.is_empty() && !token::Ident(self_path[0]).is_path_segment_keyword() {
-                    self_path[0].name = keywords::SelfValue.name();
-                    self_result = Some(self.resolve_path(&self_path, None, None));
+                if !self_path.is_empty() &&
+                    !token::Ident(self_path[0].node).is_path_segment_keyword()
+                {
+                    self_path[0].node.name = keywords::SelfValue.name();
+                    self_result = Some(self.resolve_path(&self_path, None, false, span));
                 }
                 return if let Some(PathResult::Module(..)) = self_result {
-                    Some(format!("Did you mean `{}`?", names_to_string(&self_path)))
+                    Some((span, format!("Did you mean `{}`?", names_to_string(&self_path[..]))))
                 } else {
-                    Some(msg)
+                    Some((span, msg))
                 };
             },
             _ => return None,
@@ -583,7 +627,8 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
             SingleImport { source, ref result, type_ns_only, .. } => (source, result, type_ns_only),
             GlobImport { .. } if module.def_id() == directive.parent.def_id() => {
                 // Importing a module into itself is not allowed.
-                return Some("Cannot glob-import a module into itself.".to_string());
+                return Some((directive.span,
+                             "Cannot glob-import a module into itself.".to_string()));
             }
             GlobImport { is_prelude, ref max_vis } => {
                 if !is_prelude &&
@@ -607,12 +652,17 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
                         Some(this.dummy_binding);
                 }
             }
-        } else if let Ok(binding) = this.resolve_ident_in_module(module, ident, ns, false, None) {
+        } else if let Ok(binding) = this.resolve_ident_in_module(module,
+                                                                 ident,
+                                                                 ns,
+                                                                 false,
+                                                                 false,
+                                                                 directive.span) {
             legacy_self_import = Some(directive);
             let binding = this.arenas.alloc_name_binding(NameBinding {
                 kind: NameBindingKind::Import {
-                    binding: binding,
-                    directive: directive,
+                    binding,
+                    directive,
                     used: Cell::new(false),
                     legacy_self_import: true,
                 },
@@ -628,7 +678,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
             }
             let mut all_ns_failed = true;
             self.per_ns(|this, ns| if !type_ns_only || ns == TypeNS {
-                match this.resolve_ident_in_module(module, ident, ns, false, Some(span)) {
+                match this.resolve_ident_in_module(module, ident, ns, false, true, span) {
                     Ok(_) => all_ns_failed = false,
                     _ => {}
                 }
@@ -667,7 +717,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
                 } else {
                     format!("no `{}` in `{}`{}", ident, module_str, lev_suggestion)
                 };
-                Some(msg)
+                Some((span, msg))
             } else {
                 // `resolve_ident_in_module` reported a privacy error.
                 self.import_dummy_binding(directive);
@@ -693,13 +743,16 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
             let (ns, binding) = reexport_error.unwrap();
             if ns == TypeNS && binding.is_extern_crate() {
                 let msg = format!("extern crate `{}` is private, and cannot be reexported \
-                                   (error E0364), consider declaring with `pub`",
+                                   (error E0365), consider declaring with `pub`",
                                    ident);
-                self.session.add_lint(PRIVATE_IN_PUBLIC, directive.id, directive.span, msg);
+                self.session.buffer_lint(PUB_USE_OF_PRIVATE_EXTERN_CRATE,
+                                         directive.id,
+                                         directive.span,
+                                         &msg);
             } else if ns == TypeNS {
                 struct_span_err!(self.session, directive.span, E0365,
                                  "`{}` is private, and cannot be reexported", ident)
-                    .span_label(directive.span, &format!("reexport of private `{}`", ident))
+                    .span_label(directive.span, format!("reexport of private `{}`", ident))
                     .note(&format!("consider declaring type or module `{}` with `pub`", ident))
                     .emit();
             } else {
@@ -745,8 +798,14 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
         let bindings = module.resolutions.borrow().iter().filter_map(|(&ident, resolution)| {
             resolution.borrow().binding().map(|binding| (ident, binding))
         }).collect::<Vec<_>>();
-        for ((ident, ns), binding) in bindings {
-            if binding.pseudo_vis() == ty::Visibility::Public || self.is_accessible(binding.vis) {
+        for ((mut ident, ns), binding) in bindings {
+            let scope = match ident.ctxt.reverse_glob_adjust(module.expansion,
+                                                             directive.span.ctxt().modern()) {
+                Some(Some(def)) => self.macro_def_scope(def),
+                Some(None) => self.current_module,
+                None => continue,
+            };
+            if self.is_accessible_from(binding.pseudo_vis(), scope) {
                 let imported_binding = self.import(binding, directive);
                 let _ = self.try_define(directive.parent, ident, ns, imported_binding);
             }
@@ -756,17 +815,18 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
         self.record_def(directive.id, PathResolution::new(module.def().unwrap()));
     }
 
-    // Miscellaneous post-processing, including recording reexports, reporting conflicts,
-    // reporting the PRIVATE_IN_PUBLIC lint, and reporting unresolved imports.
+    // Miscellaneous post-processing, including recording reexports,
+    // reporting conflicts, and reporting unresolved imports.
     fn finalize_resolutions_in(&mut self, module: Module<'b>) {
         // Since import resolution is finished, globs will not define any more names.
         *module.globs.borrow_mut() = Vec::new();
 
         let mut reexports = Vec::new();
+        let mut exported_macro_names = FxHashMap();
         if module as *const _ == self.graph_root as *const _ {
-            let mut exported_macro_names = FxHashSet();
-            for export in mem::replace(&mut self.macro_exports, Vec::new()).into_iter().rev() {
-                if exported_macro_names.insert(export.name) {
+            let macro_exports = mem::replace(&mut self.macro_exports, Vec::new());
+            for export in macro_exports.into_iter().rev() {
+                if exported_macro_names.insert(export.ident.modern(), export.span).is_none() {
                     reexports.push(export);
                 }
             }
@@ -780,24 +840,33 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
             };
 
             if binding.vis == ty::Visibility::Public &&
-               (binding.is_import() || binding.is_extern_crate()) {
+               (binding.is_import() || binding.is_macro_def()) {
                 let def = binding.def();
                 if def != Def::Err {
                     if !def.def_id().is_local() {
                         self.session.cstore.export_macros(def.def_id().krate);
                     }
-                    reexports.push(Export { name: ident.name, def: def });
+                    if let Def::Macro(..) = def {
+                        if let Some(&span) = exported_macro_names.get(&ident.modern()) {
+                            let msg =
+                                format!("a macro named `{}` has already been exported", ident);
+                            self.session.struct_span_err(span, &msg)
+                                .span_label(span, format!("`{}` already exported", ident))
+                                .span_note(binding.span, "previous macro export here")
+                                .emit();
+                        }
+                    }
+                    reexports.push(Export { ident: ident.modern(), def: def, span: binding.span });
                 }
             }
 
             match binding.kind {
-                NameBindingKind::Import { binding: orig_binding, directive, .. } => {
+                NameBindingKind::Import { binding: orig_binding, .. } => {
                     if ns == TypeNS && orig_binding.is_variant() &&
                        !orig_binding.vis.is_at_least(binding.vis, &*self) {
-                        let msg = format!("variant `{}` is private, and cannot be reexported \
-                                           (error E0364), consider declaring its enum as `pub`",
-                                          ident);
-                        self.session.add_lint(PRIVATE_IN_PUBLIC, directive.id, binding.span, msg);
+                        let msg = format!("variant `{}` is private, and cannot be reexported, \
+                                           consider declaring its enum as `pub`", ident);
+                        self.session.span_err(binding.span, &msg);
                     }
                 }
                 NameBindingKind::Ambiguity { b1, b2, .. }
@@ -830,16 +899,24 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
     }
 }
 
-fn import_path_to_string(names: &[Ident], subclass: &ImportDirectiveSubclass) -> String {
-    let global = !names.is_empty() && names[0].name == keywords::CrateRoot.name();
-    let names = if global { &names[1..] } else { names };
-    if names.is_empty() {
-        import_directive_subclass_to_string(subclass)
+fn import_path_to_string(names: &[SpannedIdent],
+                         subclass: &ImportDirectiveSubclass,
+                         span: Span) -> String {
+    let pos = names.iter()
+        .position(|p| span == p.span && p.node.name != keywords::CrateRoot.name());
+    let global = !names.is_empty() && names[0].node.name == keywords::CrateRoot.name();
+    if let Some(pos) = pos {
+        let names = if global { &names[1..pos + 1] } else { &names[..pos + 1] };
+        names_to_string(names)
     } else {
-        (format!("{}::{}",
-                 names_to_string(names),
-                 import_directive_subclass_to_string(subclass)))
-            .to_string()
+        let names = if global { &names[1..] } else { names };
+        if names.is_empty() {
+            import_directive_subclass_to_string(subclass)
+        } else {
+            (format!("{}::{}",
+                     names_to_string(names),
+                     import_directive_subclass_to_string(subclass)))
+        }
     }
 }
 

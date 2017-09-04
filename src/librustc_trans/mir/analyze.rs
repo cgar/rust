@@ -13,12 +13,12 @@
 
 use rustc_data_structures::bitvec::BitVector;
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
-use rustc::mir::{self, Location, TerminatorKind};
+use rustc::middle::const_val::ConstVal;
+use rustc::mir::{self, Location, TerminatorKind, Literal};
 use rustc::mir::visit::{Visitor, LvalueContext};
 use rustc::mir::traversal;
 use common;
 use super::MirContext;
-use super::rvalue;
 
 pub fn lvalue_locals<'a, 'tcx>(mircx: &MirContext<'a, 'tcx>) -> BitVector {
     let mir = mircx.mir;
@@ -92,7 +92,7 @@ impl<'mir, 'a, 'tcx> Visitor<'tcx> for LocalAnalyzer<'mir, 'a, 'tcx> {
 
         if let mir::Lvalue::Local(index) = *lvalue {
             self.mark_assigned(index);
-            if !rvalue::rvalue_creates_operand(rvalue) {
+            if !self.cx.rvalue_creates_operand(rvalue) {
                 self.mark_as_lvalue(index);
             }
         } else {
@@ -108,8 +108,10 @@ impl<'mir, 'a, 'tcx> Visitor<'tcx> for LocalAnalyzer<'mir, 'a, 'tcx> {
                              location: Location) {
         match *kind {
             mir::TerminatorKind::Call {
-                func: mir::Operand::Constant(mir::Constant {
-                    literal: mir::Literal::Item { def_id, .. }, ..
+                func: mir::Operand::Constant(box mir::Constant {
+                    literal: Literal::Value {
+                        value: ConstVal::Function(def_id, _), ..
+                    }, ..
                 }),
                 ref args, ..
             } if Some(def_id) == self.cx.ccx.tcx().lang_items.box_free_fn() => {
@@ -156,6 +158,7 @@ impl<'mir, 'a, 'tcx> Visitor<'tcx> for LocalAnalyzer<'mir, 'a, 'tcx> {
 
                 LvalueContext::StorageLive |
                 LvalueContext::StorageDead |
+                LvalueContext::Validate |
                 LvalueContext::Inspect |
                 LvalueContext::Consume => {}
 
@@ -195,6 +198,16 @@ pub enum CleanupKind {
     Internal { funclet: mir::BasicBlock }
 }
 
+impl CleanupKind {
+    pub fn funclet_bb(self, for_bb: mir::BasicBlock) -> Option<mir::BasicBlock> {
+        match self {
+            CleanupKind::NotCleanup => None,
+            CleanupKind::Funclet => Some(for_bb),
+            CleanupKind::Internal { funclet } => Some(funclet),
+        }
+    }
+}
+
 pub fn cleanup_kinds<'a, 'tcx>(mir: &mir::Mir<'tcx>) -> IndexVec<mir::BasicBlock, CleanupKind> {
     fn discover_masters<'tcx>(result: &mut IndexVec<mir::BasicBlock, CleanupKind>,
                               mir: &mir::Mir<'tcx>) {
@@ -203,8 +216,10 @@ pub fn cleanup_kinds<'a, 'tcx>(mir: &mir::Mir<'tcx>) -> IndexVec<mir::BasicBlock
                 TerminatorKind::Goto { .. } |
                 TerminatorKind::Resume |
                 TerminatorKind::Return |
+                TerminatorKind::GeneratorDrop |
                 TerminatorKind::Unreachable |
-                TerminatorKind::SwitchInt { .. } => {
+                TerminatorKind::SwitchInt { .. } |
+                TerminatorKind::Yield { .. }  => {
                     /* nothing to do */
                 }
                 TerminatorKind::Call { cleanup: unwind, .. } |
@@ -258,7 +273,9 @@ pub fn cleanup_kinds<'a, 'tcx>(mir: &mir::Mir<'tcx>) -> IndexVec<mir::BasicBlock
                         result[succ] = CleanupKind::Internal { funclet: funclet };
                     }
                     CleanupKind::Funclet => {
-                        set_successor(funclet, succ);
+                        if funclet != succ {
+                            set_successor(funclet, succ);
+                        }
                     }
                     CleanupKind::Internal { funclet: succ_funclet } => {
                         if funclet != succ_funclet {

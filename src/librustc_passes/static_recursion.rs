@@ -11,14 +11,13 @@
 // This compiler pass detects constants that refer to themselves
 // recursively.
 
-use rustc::dep_graph::DepNode;
 use rustc::hir::map as hir_map;
-use rustc::session::{CompileResult, Session};
+use rustc::session::Session;
 use rustc::hir::def::{Def, CtorKind};
+use rustc::util::common::ErrorReported;
 use rustc::util::nodemap::{NodeMap, NodeSet};
 
 use syntax::ast;
-use syntax::feature_gate::{GateIssue, emit_feature_err};
 use syntax_pos::Span;
 use rustc::hir::intravisit::{self, Visitor, NestedVisitorMap};
 use rustc::hir;
@@ -43,7 +42,7 @@ impl<'a, 'hir: 'a> Visitor<'hir> for CheckCrateVisitor<'a, 'hir> {
         match it.node {
             hir::ItemStatic(..) |
             hir::ItemConst(..) => {
-                let mut recursion_visitor = CheckItemRecursionVisitor::new(self, &it.span);
+                let mut recursion_visitor = CheckItemRecursionVisitor::new(self);
                 recursion_visitor.visit_item(it);
             }
             hir::ItemEnum(ref enum_def, ref generics) => {
@@ -52,8 +51,7 @@ impl<'a, 'hir: 'a> Visitor<'hir> for CheckCrateVisitor<'a, 'hir> {
                 // less redundant output.
                 for variant in &enum_def.variants {
                     if let Some(_) = variant.node.disr_expr {
-                        let mut recursion_visitor = CheckItemRecursionVisitor::new(self,
-                                                                                   &variant.span);
+                        let mut recursion_visitor = CheckItemRecursionVisitor::new(self);
                         recursion_visitor.populate_enum_discriminants(enum_def);
                         recursion_visitor.visit_variant(variant, generics, it.id);
                     }
@@ -68,7 +66,7 @@ impl<'a, 'hir: 'a> Visitor<'hir> for CheckCrateVisitor<'a, 'hir> {
         match ti.node {
             hir::TraitItemKind::Const(_, ref default) => {
                 if let Some(_) = *default {
-                    let mut recursion_visitor = CheckItemRecursionVisitor::new(self, &ti.span);
+                    let mut recursion_visitor = CheckItemRecursionVisitor::new(self);
                     recursion_visitor.visit_trait_item(ti);
                 }
             }
@@ -80,7 +78,7 @@ impl<'a, 'hir: 'a> Visitor<'hir> for CheckCrateVisitor<'a, 'hir> {
     fn visit_impl_item(&mut self, ii: &'hir hir::ImplItem) {
         match ii.node {
             hir::ImplItemKind::Const(..) => {
-                let mut recursion_visitor = CheckItemRecursionVisitor::new(self, &ii.span);
+                let mut recursion_visitor = CheckItemRecursionVisitor::new(self);
                 recursion_visitor.visit_impl_item(ii);
             }
             _ => {}
@@ -89,12 +87,12 @@ impl<'a, 'hir: 'a> Visitor<'hir> for CheckCrateVisitor<'a, 'hir> {
     }
 }
 
-pub fn check_crate<'hir>(sess: &Session, hir_map: &hir_map::Map<'hir>) -> CompileResult {
-    let _task = hir_map.dep_graph.in_task(DepNode::CheckStaticRecursion);
-
+pub fn check_crate<'hir>(sess: &Session, hir_map: &hir_map::Map<'hir>)
+                         -> Result<(), ErrorReported>
+{
     let mut visitor = CheckCrateVisitor {
-        sess: sess,
-        hir_map: hir_map,
+        sess,
+        hir_map,
         discriminant_map: NodeMap(),
         detected_recursive_ids: NodeSet(),
     };
@@ -105,7 +103,6 @@ pub fn check_crate<'hir>(sess: &Session, hir_map: &hir_map::Map<'hir>) -> Compil
 }
 
 struct CheckItemRecursionVisitor<'a, 'b: 'a, 'hir: 'b> {
-    root_span: &'b Span,
     sess: &'b Session,
     hir_map: &'b hir_map::Map<'hir>,
     discriminant_map: &'a mut NodeMap<Option<hir::BodyId>>,
@@ -114,9 +111,8 @@ struct CheckItemRecursionVisitor<'a, 'b: 'a, 'hir: 'b> {
 }
 
 impl<'a, 'b: 'a, 'hir: 'b> CheckItemRecursionVisitor<'a, 'b, 'hir> {
-    fn new(v: &'a mut CheckCrateVisitor<'b, 'hir>, span: &'b Span) -> Self {
+    fn new(v: &'a mut CheckCrateVisitor<'b, 'hir>) -> Self {
         CheckItemRecursionVisitor {
-            root_span: span,
             sess: v.sess,
             hir_map: v.hir_map,
             discriminant_map: &mut v.discriminant_map,
@@ -143,17 +139,9 @@ impl<'a, 'b: 'a, 'hir: 'b> CheckItemRecursionVisitor<'a, 'b, 'hir> {
                     false
                 }
             });
-            if any_static {
-                if !self.sess.features.borrow().static_recursion {
-                    emit_feature_err(&self.sess.parse_sess,
-                                     "static_recursion",
-                                     *self.root_span,
-                                     GateIssue::Language,
-                                     "recursive static");
-                }
-            } else {
+            if !any_static {
                 struct_span_err!(self.sess, span, E0265, "recursive constant")
-                    .span_label(span, &format!("recursion not allowed in constant"))
+                    .span_label(span, "recursion not allowed in constant")
                     .emit();
             }
             return;

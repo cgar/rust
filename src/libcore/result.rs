@@ -242,10 +242,14 @@
 
 use fmt;
 use iter::{FromIterator, FusedIterator, TrustedLen};
+use ops;
 
-/// `Result` is a type that represents either success (`Ok`) or failure (`Err`).
+/// `Result` is a type that represents either success ([`Ok`]) or failure ([`Err`]).
 ///
 /// See the [`std::result`](index.html) module documentation for details.
+///
+/// [`Ok`]: enum.Result.html#variant.Ok
+/// [`Err`]: enum.Result.html#variant.Err
 #[derive(Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Debug, Hash)]
 #[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -268,7 +272,9 @@ impl<T, E> Result<T, E> {
     // Querying the contained values
     /////////////////////////////////////////////////////////////////////////
 
-    /// Returns true if the result is `Ok`.
+    /// Returns `true` if the result is [`Ok`].
+    ///
+    /// [`Ok`]: enum.Result.html#variant.Ok
     ///
     /// # Examples
     ///
@@ -290,7 +296,9 @@ impl<T, E> Result<T, E> {
         }
     }
 
-    /// Returns true if the result is `Err`.
+    /// Returns `true` if the result is [`Err`].
+    ///
+    /// [`Err`]: enum.Result.html#variant.Err
     ///
     /// # Examples
     ///
@@ -432,9 +440,12 @@ impl<T, E> Result<T, E> {
     /////////////////////////////////////////////////////////////////////////
 
     /// Maps a `Result<T, E>` to `Result<U, E>` by applying a function to a
-    /// contained `Ok` value, leaving an `Err` value untouched.
+    /// contained [`Ok`] value, leaving an [`Err`] value untouched.
     ///
     /// This function can be used to compose the results of two functions.
+    ///
+    /// [`Ok`]: enum.Result.html#variant.Ok
+    /// [`Err`]: enum.Result.html#variant.Err
     ///
     /// # Examples
     ///
@@ -460,10 +471,13 @@ impl<T, E> Result<T, E> {
     }
 
     /// Maps a `Result<T, E>` to `Result<T, F>` by applying a function to a
-    /// contained `Err` value, leaving an `Ok` value untouched.
+    /// contained [`Err`] value, leaving an [`Ok`] value untouched.
     ///
     /// This function can be used to pass through a successful result while handling
     /// an error.
+    ///
+    /// [`Ok`]: enum.Result.html#variant.Ok
+    /// [`Err`]: enum.Result.html#variant.Err
     ///
     /// # Examples
     ///
@@ -545,7 +559,10 @@ impl<T, E> Result<T, E> {
     // Boolean operations on the values, eager and lazy
     /////////////////////////////////////////////////////////////////////////
 
-    /// Returns `res` if the result is `Ok`, otherwise returns the `Err` value of `self`.
+    /// Returns `res` if the result is [`Ok`], otherwise returns the [`Err`] value of `self`.
+    ///
+    /// [`Ok`]: enum.Result.html#variant.Ok
+    /// [`Err`]: enum.Result.html#variant.Err
     ///
     /// # Examples
     ///
@@ -577,7 +594,10 @@ impl<T, E> Result<T, E> {
         }
     }
 
-    /// Calls `op` if the result is `Ok`, otherwise returns the `Err` value of `self`.
+    /// Calls `op` if the result is [`Ok`], otherwise returns the [`Err`] value of `self`.
+    ///
+    /// [`Ok`]: enum.Result.html#variant.Ok
+    /// [`Err`]: enum.Result.html#variant.Err
     ///
     /// This function can be used for control flow based on `Result` values.
     ///
@@ -603,7 +623,10 @@ impl<T, E> Result<T, E> {
         }
     }
 
-    /// Returns `res` if the result is `Err`, otherwise returns the `Ok` value of `self`.
+    /// Returns `res` if the result is [`Err`], otherwise returns the [`Ok`] value of `self`.
+    ///
+    /// [`Ok`]: enum.Result.html#variant.Ok
+    /// [`Err`]: enum.Result.html#variant.Err
     ///
     /// # Examples
     ///
@@ -635,9 +658,12 @@ impl<T, E> Result<T, E> {
         }
     }
 
-    /// Calls `op` if the result is `Err`, otherwise returns the `Ok` value of `self`.
+    /// Calls `op` if the result is [`Err`], otherwise returns the [`Ok`] value of `self`.
     ///
     /// This function can be used for control flow based on result values.
+    ///
+    /// [`Ok`]: enum.Result.html#variant.Ok
+    /// [`Err`]: enum.Result.html#variant.Err
     ///
     /// # Examples
     ///
@@ -661,8 +687,11 @@ impl<T, E> Result<T, E> {
         }
     }
 
-    /// Unwraps a result, yielding the content of an `Ok`.
+    /// Unwraps a result, yielding the content of an [`Ok`].
     /// Else, it returns `optb`.
+    ///
+    /// [`Ok`]: enum.Result.html#variant.Ok
+    /// [`Err`]: enum.Result.html#variant.Err
     ///
     /// # Examples
     ///
@@ -685,8 +714,11 @@ impl<T, E> Result<T, E> {
         }
     }
 
-    /// Unwraps a result, yielding the content of an `Ok`.
-    /// If the value is an `Err` then it calls `op` with its value.
+    /// Unwraps a result, yielding the content of an [`Ok`].
+    /// If the value is an [`Err`] then it calls `op` with its value.
+    ///
+    /// [`Ok`]: enum.Result.html#variant.Ok
+    /// [`Err`]: enum.Result.html#variant.Err
     ///
     /// # Examples
     ///
@@ -709,12 +741,15 @@ impl<T, E> Result<T, E> {
 }
 
 impl<T, E: fmt::Debug> Result<T, E> {
-    /// Unwraps a result, yielding the content of an `Ok`.
+    /// Unwraps a result, yielding the content of an [`Ok`].
     ///
     /// # Panics
     ///
-    /// Panics if the value is an `Err`, with a panic message provided by the
-    /// `Err`'s value.
+    /// Panics if the value is an [`Err`], with a panic message provided by the
+    /// [`Err`]'s value.
+    ///
+    /// [`Ok`]: enum.Result.html#variant.Ok
+    /// [`Err`]: enum.Result.html#variant.Err
     ///
     /// # Examples
     ///
@@ -738,12 +773,15 @@ impl<T, E: fmt::Debug> Result<T, E> {
         }
     }
 
-    /// Unwraps a result, yielding the content of an `Ok`.
+    /// Unwraps a result, yielding the content of an [`Ok`].
     ///
     /// # Panics
     ///
-    /// Panics if the value is an `Err`, with a panic message including the
-    /// passed message, and the content of the `Err`.
+    /// Panics if the value is an [`Err`], with a panic message including the
+    /// passed message, and the content of the [`Err`].
+    ///
+    /// [`Ok`]: enum.Result.html#variant.Ok
+    /// [`Err`]: enum.Result.html#variant.Err
     ///
     /// # Examples
     ///
@@ -764,12 +802,16 @@ impl<T, E: fmt::Debug> Result<T, E> {
 }
 
 impl<T: fmt::Debug, E> Result<T, E> {
-    /// Unwraps a result, yielding the content of an `Err`.
+    /// Unwraps a result, yielding the content of an [`Err`].
     ///
     /// # Panics
     ///
-    /// Panics if the value is an `Ok`, with a custom panic message provided
-    /// by the `Ok`'s value.
+    /// Panics if the value is an [`Ok`], with a custom panic message provided
+    /// by the [`Ok`]'s value.
+    ///
+    /// [`Ok`]: enum.Result.html#variant.Ok
+    /// [`Err`]: enum.Result.html#variant.Err
+    ///
     ///
     /// # Examples
     ///
@@ -791,24 +833,26 @@ impl<T: fmt::Debug, E> Result<T, E> {
         }
     }
 
-    /// Unwraps a result, yielding the content of an `Err`.
+    /// Unwraps a result, yielding the content of an [`Err`].
     ///
     /// # Panics
     ///
-    /// Panics if the value is an `Ok`, with a panic message including the
-    /// passed message, and the content of the `Ok`.
+    /// Panics if the value is an [`Ok`], with a panic message including the
+    /// passed message, and the content of the [`Ok`].
+    ///
+    /// [`Ok`]: enum.Result.html#variant.Ok
+    /// [`Err`]: enum.Result.html#variant.Err
     ///
     /// # Examples
     ///
     /// Basic usage:
     ///
     /// ```{.should_panic}
-    /// # #![feature(result_expect_err)]
     /// let x: Result<u32, &str> = Ok(10);
     /// x.expect_err("Testing expect_err"); // panics with `Testing expect_err: 10`
     /// ```
     #[inline]
-    #[unstable(feature = "result_expect_err", issue = "39041")]
+    #[stable(feature = "result_expect_err", since = "1.17.0")]
     pub fn expect_err(self, msg: &str) -> E {
         match self {
             Ok(t) => unwrap_failed(msg, t),
@@ -820,8 +864,8 @@ impl<T: fmt::Debug, E> Result<T, E> {
 impl<T: Default, E> Result<T, E> {
     /// Returns the contained value or a default
     ///
-    /// Consumes the `self` argument then, if `Ok`, returns the contained
-    /// value, otherwise if `Err`, returns the default value for that
+    /// Consumes the `self` argument then, if [`Ok`], returns the contained
+    /// value, otherwise if [`Err`], returns the default value for that
     /// type.
     ///
     /// # Examples
@@ -829,7 +873,7 @@ impl<T: Default, E> Result<T, E> {
     /// Convert a string to an integer, turning poorly-formed strings
     /// into 0 (the default value for integers). [`parse`] converts
     /// a string to any other type that implements [`FromStr`], returning an
-    /// `Err` on error.
+    /// [`Err`] on error.
     ///
     /// ```
     /// let good_year_from_input = "1909";
@@ -839,10 +883,12 @@ impl<T: Default, E> Result<T, E> {
     ///
     /// assert_eq!(1909, good_year);
     /// assert_eq!(0, bad_year);
+    /// ```
     ///
     /// [`parse`]: ../../std/primitive.str.html#method.parse
     /// [`FromStr`]: ../../std/str/trait.FromStr.html
-    /// ```
+    /// [`Ok`]: enum.Result.html#variant.Ok
+    /// [`Err`]: enum.Result.html#variant.Err
     #[inline]
     #[stable(feature = "result_unwrap_or_default", since = "1.16.0")]
     pub fn unwrap_or_default(self) -> T {
@@ -909,7 +955,7 @@ impl<'a, T, E> IntoIterator for &'a mut Result<T, E> {
     type Item = &'a mut T;
     type IntoIter = IterMut<'a, T>;
 
-    fn into_iter(mut self) -> IterMut<'a, T> {
+    fn into_iter(self) -> IterMut<'a, T> {
         self.iter_mut()
     }
 }
@@ -1060,12 +1106,9 @@ impl<A, E, V: FromIterator<A>> FromIterator<Result<A, E>> for Result<V, E> {
     /// checking for overflow:
     ///
     /// ```
-    /// use std::u32;
-    ///
     /// let v = vec![1, 2];
-    /// let res: Result<Vec<u32>, &'static str> = v.iter().map(|&x: &u32|
-    ///     if x == u32::MAX { Err("Overflow!") }
-    ///     else { Ok(x + 1) }
+    /// let res: Result<Vec<u32>, &'static str> = v.iter().map(|x: &u32|
+    ///     x.checked_add(1).ok_or("Overflow!")
     /// ).collect();
     /// assert!(res == Ok(vec![2, 3]));
     /// ```
@@ -1107,5 +1150,23 @@ impl<A, E, V: FromIterator<A>> FromIterator<Result<A, E>> for Result<V, E> {
             Some(err) => Err(err),
             None => Ok(v),
         }
+    }
+}
+
+#[unstable(feature = "try_trait", issue = "42327")]
+impl<T,E> ops::Try for Result<T, E> {
+    type Ok = T;
+    type Error = E;
+
+    fn into_result(self) -> Self {
+        self
+    }
+
+    fn from_ok(v: T) -> Self {
+        Ok(v)
+    }
+
+    fn from_error(v: E) -> Self {
+        Err(v)
     }
 }

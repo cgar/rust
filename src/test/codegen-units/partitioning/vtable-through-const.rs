@@ -67,9 +67,9 @@ mod mod1 {
     pub const ID_I64: fn(i64) -> i64 = id::<i64>;
 }
 
-//~ TRANS_ITEM fn vtable_through_const::main[0] @@ vtable_through_const[External]
+//~ TRANS_ITEM fn vtable_through_const::main[0] @@ vtable_through_const[Internal]
 fn main() {
-    //~ TRANS_ITEM drop-glue i8 @@ vtable_through_const[Internal]
+    //~ TRANS_ITEM fn core::ptr[0]::drop_in_place[0]<u32> @@ vtable_through_const[Internal]
 
     // Since Trait1::do_something() is instantiated via its default implementation,
     // it is considered a generic and is instantiated here only because it is

@@ -53,7 +53,7 @@ pub trait Sample<Support> {
 // trait called `Sample` and the other should be `DependentSample`.
 pub trait IndependentSample<Support>: Sample<Support> {
     /// Generate a random value.
-    fn ind_sample<R: Rng>(&self, &mut R) -> Support;
+    fn ind_sample<R: Rng>(&self, _: &mut R) -> Support;
 }
 
 /// A wrapper for generating types that implement `Rand` via the
@@ -149,7 +149,7 @@ impl<'a, T: Clone> WeightedChoice<'a, T> {
                 "WeightedChoice::new called with a total weight of 0");
 
         WeightedChoice {
-            items: items,
+            items,
             // we're likely to be generating numbers in this range
             // relatively often, so might as well cache it
             weight_range: Range::new(0, running_total),

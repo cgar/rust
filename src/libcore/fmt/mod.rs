@@ -49,8 +49,31 @@ pub mod rt {
     pub mod v1;
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
 /// The type returned by formatter methods.
+///
+/// # Examples
+///
+/// ```
+/// use std::fmt;
+///
+/// #[derive(Debug)]
+/// struct Triangle {
+///     a: f32,
+///     b: f32,
+///     c: f32
+/// }
+///
+/// impl fmt::Display for Triangle {
+///     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+///         write!(f, "({}, {}, {})", self.a, self.b, self.c)
+///     }
+/// }
+///
+/// let pythagorean_triple = Triangle { a: 3.0, b: 4.0, c: 5.0 };
+///
+/// println!("{}", pythagorean_triple);
+/// ```
+#[stable(feature = "rust1", since = "1.0.0")]
 pub type Result = result::Result<(), Error>;
 
 /// The error type which is returned from formatting a message into a stream.
@@ -58,6 +81,22 @@ pub type Result = result::Result<(), Error>;
 /// This type does not support transmission of an error other than that an error
 /// occurred. Any extra information must be arranged to be transmitted through
 /// some other means.
+///
+/// An important thing to remember is that the type `fmt::Error` should not be
+/// confused with `std::io::Error` or `std::error::Error`, which you may also
+/// have in scope.
+///
+/// # Examples
+///
+/// ```rust
+/// use std::fmt::{self, write};
+///
+/// let mut output = String::new();
+/// match write(&mut output, format_args!("Hello {}!", "world")) {
+///     Err(fmt::Error) => panic!("An error occurred"),
+///     _ => (),
+/// }
+/// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Copy, Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Error;
@@ -65,12 +104,15 @@ pub struct Error;
 /// A collection of methods that are required to format a message into a stream.
 ///
 /// This trait is the type which this modules requires when formatting
-/// information. This is similar to the standard library's `io::Write` trait,
+/// information. This is similar to the standard library's [`io::Write`] trait,
 /// but it is only intended for use in libcore.
 ///
 /// This trait should generally not be implemented by consumers of the standard
-/// library. The `write!` macro accepts an instance of `io::Write`, and the
-/// `io::Write` trait is favored over implementing this trait.
+/// library. The [`write!`] macro accepts an instance of [`io::Write`], and the
+/// [`io::Write`] trait is favored over implementing this trait.
+///
+/// [`write!`]: ../../std/macro.write.html
+/// [`io::Write`]: ../../std/io/trait.Write.html
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Write {
     /// Writes a slice of bytes into this writer, returning whether the write
@@ -82,29 +124,79 @@ pub trait Write {
     ///
     /// # Errors
     ///
-    /// This function will return an instance of `Error` on error.
+    /// This function will return an instance of [`Error`] on error.
+    ///
+    /// [`Error`]: struct.Error.html
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::fmt::{Error, Write};
+    ///
+    /// fn writer<W: Write>(f: &mut W, s: &str) -> Result<(), Error> {
+    ///     f.write_str(s)
+    /// }
+    ///
+    /// let mut buf = String::new();
+    /// writer(&mut buf, "hola").unwrap();
+    /// assert_eq!(&buf, "hola");
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     fn write_str(&mut self, s: &str) -> Result;
 
-    /// Writes a `char` into this writer, returning whether the write succeeded.
+    /// Writes a [`char`] into this writer, returning whether the write succeeded.
     ///
-    /// A single `char` may be encoded as more than one byte.
+    /// A single [`char`] may be encoded as more than one byte.
     /// This method can only succeed if the entire byte sequence was successfully
     /// written, and this method will not return until all data has been
     /// written or an error occurs.
     ///
     /// # Errors
     ///
-    /// This function will return an instance of `Error` on error.
+    /// This function will return an instance of [`Error`] on error.
+    ///
+    /// [`char`]: ../../std/primitive.char.html
+    /// [`Error`]: struct.Error.html
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::fmt::{Error, Write};
+    ///
+    /// fn writer<W: Write>(f: &mut W, c: char) -> Result<(), Error> {
+    ///     f.write_char(c)
+    /// }
+    ///
+    /// let mut buf = String::new();
+    /// writer(&mut buf, 'a').unwrap();
+    /// writer(&mut buf, 'b').unwrap();
+    /// assert_eq!(&buf, "ab");
+    /// ```
     #[stable(feature = "fmt_write_char", since = "1.1.0")]
     fn write_char(&mut self, c: char) -> Result {
         self.write_str(c.encode_utf8(&mut [0; 4]))
     }
 
-    /// Glue for usage of the `write!` macro with implementors of this trait.
+    /// Glue for usage of the [`write!`] macro with implementors of this trait.
     ///
     /// This method should generally not be invoked manually, but rather through
-    /// the `write!` macro itself.
+    /// the [`write!`] macro itself.
+    ///
+    /// [`write!`]: ../../std/macro.write.html
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::fmt::{Error, Write};
+    ///
+    /// fn writer<W: Write>(f: &mut W, s: &str) -> Result<(), Error> {
+    ///     f.write_fmt(format_args!("{}", s))
+    /// }
+    ///
+    /// let mut buf = String::new();
+    /// writer(&mut buf, "world").unwrap();
+    /// assert_eq!(&buf, "world");
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     fn write_fmt(&mut self, args: Arguments) -> Result {
         // This Adapter is needed to allow `self` (of type `&mut
@@ -242,9 +334,9 @@ impl<'a> Arguments<'a> {
     pub fn new_v1(pieces: &'a [&'a str],
                   args: &'a [ArgumentV1<'a>]) -> Arguments<'a> {
         Arguments {
-            pieces: pieces,
+            pieces,
             fmt: None,
-            args: args
+            args,
         }
     }
 
@@ -261,9 +353,9 @@ impl<'a> Arguments<'a> {
                             args: &'a [ArgumentV1<'a>],
                             fmt: &'a [rt::v1::Argument]) -> Arguments<'a> {
         Arguments {
-            pieces: pieces,
+            pieces,
             fmt: Some(fmt),
-            args: args
+            args,
         }
     }
 
@@ -476,6 +568,26 @@ pub trait Debug {
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Display {
     /// Formats the value using the given formatter.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::fmt;
+    ///
+    /// struct Position {
+    ///     longitude: f32,
+    ///     latitude: f32,
+    /// }
+    ///
+    /// impl fmt::Display for Position {
+    ///     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    ///         write!(f, "({}, {})", self.longitude, self.latitude)
+    ///     }
+    /// }
+    ///
+    /// assert_eq!("(1.987, 2.983)".to_owned(),
+    ///            format!("{}", Position { longitude: 1.987, latitude: 2.983, }));
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     fn fmt(&self, f: &mut Formatter) -> Result;
 }
@@ -801,14 +913,11 @@ pub trait UpperExp {
     fn fmt(&self, f: &mut Formatter) -> Result;
 }
 
-/// The `write` function takes an output stream, a precompiled format string,
-/// and a list of arguments. The arguments will be formatted according to the
-/// specified format string into the output stream provided.
+/// The `write` function takes an output stream, and an `Arguments` struct
+/// that can be precompiled with the `format_args!` macro.
 ///
-/// # Arguments
-///
-///   * output - the buffer to write output to
-///   * args - the precompiled arguments generated by `format_args!`
+/// The arguments will be formatted according to the specified format string
+/// into the output stream provided.
 ///
 /// # Examples
 ///
@@ -877,7 +986,6 @@ pub fn write(output: &mut Write, args: Arguments) -> Result {
 }
 
 impl<'a> Formatter<'a> {
-
     // First up is the collection of functions used to execute a format string
     // at runtime. This consumes all of the compile-time statics generated by
     // the format! syntax extension.
@@ -973,6 +1081,7 @@ impl<'a> Formatter<'a> {
             // is zero
             Some(min) if self.sign_aware_zero_pad() => {
                 self.fill = '0';
+                self.align = rt::v1::Alignment::Right;
                 write_prefix(self)?;
                 self.with_padding(min - width, rt::v1::Alignment::Right, |f| {
                     f.buf.write_str(buf)
@@ -1081,8 +1190,9 @@ impl<'a> Formatter<'a> {
             // for the sign-aware zero padding, we render the sign first and
             // behave as if we had no sign from the beginning.
             let mut formatted = formatted.clone();
-            let mut align = self.align;
             let old_fill = self.fill;
+            let old_align = self.align;
+            let mut align = old_align;
             if self.sign_aware_zero_pad() {
                 // a sign always goes first
                 let sign = unsafe { str::from_utf8_unchecked(formatted.sign) };
@@ -1093,6 +1203,7 @@ impl<'a> Formatter<'a> {
                 width = if width < sign.len() { 0 } else { width - sign.len() };
                 align = rt::v1::Alignment::Right;
                 self.fill = '0';
+                self.align = rt::v1::Alignment::Right;
             }
 
             // remaining parts go through the ordinary padding process.
@@ -1105,6 +1216,7 @@ impl<'a> Formatter<'a> {
                 })
             };
             self.fill = old_fill;
+            self.align = old_align;
             ret
         } else {
             // this is the common case and we take a shortcut
@@ -1235,7 +1347,6 @@ impl<'a> Formatter<'a> {
     /// println!("{:?}", Foo { bar: 10, baz: "Hello World".to_string() });
     /// ```
     #[stable(feature = "debug_builders", since = "1.2.0")]
-    #[inline]
     pub fn debug_struct<'b>(&'b mut self, name: &str) -> DebugStruct<'b, 'a> {
         builders::debug_struct_new(self, name)
     }
@@ -1263,7 +1374,6 @@ impl<'a> Formatter<'a> {
     /// println!("{:?}", Foo(10, "Hello World".to_string()));
     /// ```
     #[stable(feature = "debug_builders", since = "1.2.0")]
-    #[inline]
     pub fn debug_tuple<'b>(&'b mut self, name: &str) -> DebugTuple<'b, 'a> {
         builders::debug_tuple_new(self, name)
     }
@@ -1288,7 +1398,6 @@ impl<'a> Formatter<'a> {
     /// println!("{:?}", Foo(vec![10, 11]));
     /// ```
     #[stable(feature = "debug_builders", since = "1.2.0")]
-    #[inline]
     pub fn debug_list<'b>(&'b mut self) -> DebugList<'b, 'a> {
         builders::debug_list_new(self)
     }
@@ -1313,7 +1422,6 @@ impl<'a> Formatter<'a> {
     /// println!("{:?}", Foo(vec![10, 11]));
     /// ```
     #[stable(feature = "debug_builders", since = "1.2.0")]
-    #[inline]
     pub fn debug_set<'b>(&'b mut self) -> DebugSet<'b, 'a> {
         builders::debug_set_new(self)
     }
@@ -1338,7 +1446,6 @@ impl<'a> Formatter<'a> {
     /// println!("{:?}", Foo(vec![("A".to_string(), 10), ("B".to_string(), 11)]));
     /// ```
     #[stable(feature = "debug_builders", since = "1.2.0")]
-    #[inline]
     pub fn debug_map<'b>(&'b mut self) -> DebugMap<'b, 'a> {
         builders::debug_map_new(self)
     }
@@ -1531,13 +1638,13 @@ macro_rules! tuple {
     () => ();
     ( $($name:ident,)+ ) => (
         #[stable(feature = "rust1", since = "1.0.0")]
-        impl<$($name:Debug),*> Debug for ($($name,)*) {
+        impl<$($name:Debug),*> Debug for ($($name,)*) where last_type!($($name,)+): ?Sized {
             #[allow(non_snake_case, unused_assignments, deprecated)]
             fn fmt(&self, f: &mut Formatter) -> Result {
                 let mut builder = f.debug_tuple("");
                 let ($(ref $name,)*) = *self;
                 $(
-                    builder.field($name);
+                    builder.field(&$name);
                 )*
 
                 builder.finish()
@@ -1545,6 +1652,11 @@ macro_rules! tuple {
         }
         peel! { $($name,)* }
     )
+}
+
+macro_rules! last_type {
+    ($a:ident,) => { $a };
+    ($a:ident, $($rest_a:ident,)+) => { last_type!($($rest_a,)+) };
 }
 
 tuple! { T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, }

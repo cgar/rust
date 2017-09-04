@@ -165,21 +165,26 @@ pub fn lookup_host(host: &str) -> io::Result<LookupHost> {
     init();
 
     let c_host = CString::new(host)?;
-    let hints = c::addrinfo {
-        ai_flags: 0,
-        ai_family: 0,
-        ai_socktype: c::SOCK_STREAM,
-        ai_protocol: 0,
-        ai_addrlen: 0,
-        ai_addr: ptr::null_mut(),
-        ai_canonname: ptr::null_mut(),
-        ai_next: ptr::null_mut()
-    };
+    let mut hints: c::addrinfo = unsafe { mem::zeroed() };
+    hints.ai_socktype = c::SOCK_STREAM;
     let mut res = ptr::null_mut();
     unsafe {
-        cvt_gai(c::getaddrinfo(c_host.as_ptr(), ptr::null(), &hints,
-                               &mut res))?;
-        Ok(LookupHost { original: res, cur: res })
+        match cvt_gai(c::getaddrinfo(c_host.as_ptr(), ptr::null(), &hints, &mut res)) {
+            Ok(_) => {
+                Ok(LookupHost { original: res, cur: res })
+            },
+            #[cfg(unix)]
+            Err(e) => {
+                // The lookup failure could be caused by using a stale /etc/resolv.conf.
+                // See https://github.com/rust-lang/rust/issues/41570.
+                // We therefore force a reload of the nameserver information.
+                c::res_init();
+                Err(e)
+            },
+            // the cfg is needed here to avoid an "unreachable pattern" warning
+            #[cfg(not(unix))]
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -199,6 +204,14 @@ impl TcpStream {
 
         let (addrp, len) = addr.into_inner();
         cvt_r(|| unsafe { c::connect(*sock.as_inner(), addrp, len) })?;
+        Ok(TcpStream { inner: sock })
+    }
+
+    pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+        init();
+
+        let sock = Socket::new(addr, c::SOCK_STREAM)?;
+        sock.connect_timeout(addr, timeout)?;
         Ok(TcpStream { inner: sock })
     }
 
@@ -228,10 +241,6 @@ impl TcpStream {
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.read(buf)
-    }
-
-    pub fn read_to_end(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        self.inner.read_to_end(buf)
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
@@ -339,7 +348,7 @@ impl TcpListener {
 
         // Bind our new socket
         let (addrp, len) = addr.into_inner();
-        cvt(unsafe { c::bind(*sock.as_inner(), addrp, len) })?;
+        cvt(unsafe { c::bind(*sock.as_inner(), addrp, len as _) })?;
 
         // Start listening
         cvt(unsafe { c::listen(*sock.as_inner(), 128) })?;
@@ -430,7 +439,7 @@ impl UdpSocket {
 
         let sock = Socket::new(addr, c::SOCK_DGRAM)?;
         let (addrp, len) = addr.into_inner();
-        cvt(unsafe { c::bind(*sock.as_inner(), addrp, len) })?;
+        cvt(unsafe { c::bind(*sock.as_inner(), addrp, len as _) })?;
         Ok(UdpSocket { inner: sock })
     }
 

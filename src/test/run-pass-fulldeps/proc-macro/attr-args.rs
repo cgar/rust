@@ -9,6 +9,7 @@
 // except according to those terms.
 
 // aux-build:attr-args.rs
+// ignore-stage1
 
 #![allow(warnings)]
 #![feature(proc_macro)]
@@ -19,6 +20,6 @@ use attr_args::attr_with_args;
 #[attr_with_args(text = "Hello, world!")]
 fn foo() {}
 
-fn main() {
-    assert_eq!(foo(), "Hello, world!");
-}
+#[::attr_args::identity
+  fn main() { assert_eq!(foo(), "Hello, world!"); }]
+struct Dummy;

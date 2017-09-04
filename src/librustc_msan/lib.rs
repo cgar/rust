@@ -8,9 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![cfg_attr(not(stage0), feature(sanitizer_runtime))]
-#![cfg_attr(not(stage0), sanitizer_runtime)]
+#![sanitizer_runtime]
+#![feature(sanitizer_runtime)]
 #![feature(alloc_system)]
+#![feature(allocator_api)]
+#![feature(global_allocator)]
 #![feature(staged_api)]
 #![no_std]
 #![unstable(feature = "sanitizer_runtime_lib",
@@ -18,3 +20,8 @@
             issue = "0")]
 
 extern crate alloc_system;
+
+use alloc_system::System;
+
+#[global_allocator]
+static ALLOC: System = System;

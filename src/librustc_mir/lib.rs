@@ -14,26 +14,22 @@ Rust MIR: a lowered representation of Rust. Also: an experiment!
 
 */
 
-#![crate_name = "rustc_mir"]
-#![crate_type = "rlib"]
-#![crate_type = "dylib"]
 #![deny(warnings)]
-#![unstable(feature = "rustc_private", issue = "27812")]
 
-#![feature(associated_consts)]
 #![feature(box_patterns)]
+#![feature(box_syntax)]
 #![feature(i128_type)]
 #![feature(rustc_diagnostic_macros)]
-#![feature(rustc_private)]
-#![feature(staged_api)]
 #![feature(placement_in_syntax)]
 #![feature(collection_placement)]
+#![feature(nonzero)]
 
 #[macro_use] extern crate log;
 extern crate graphviz as dot;
 #[macro_use]
 extern crate rustc;
 extern crate rustc_data_structures;
+extern crate rustc_errors;
 #[macro_use]
 #[no_link]
 extern crate rustc_bitflags;
@@ -42,14 +38,24 @@ extern crate syntax;
 extern crate syntax_pos;
 extern crate rustc_const_math;
 extern crate rustc_const_eval;
+extern crate core; // for NonZero
 
-pub mod diagnostics;
+mod diagnostics;
 
-pub mod build;
-pub mod def_use;
-pub mod graphviz;
+mod borrow_check;
+mod build;
+mod dataflow;
 mod hair;
-pub mod mir_map;
-pub mod pretty;
+mod shim;
 pub mod transform;
+pub mod util;
 
+use rustc::ty::maps::Providers;
+
+pub fn provide(providers: &mut Providers) {
+    borrow_check::provide(providers);
+    shim::provide(providers);
+    transform::provide(providers);
+}
+
+__build_diagnostic_array! { librustc_mir, DIAGNOSTICS }

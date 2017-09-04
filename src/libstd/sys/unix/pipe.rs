@@ -8,13 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use cmp;
 use io;
 use libc::{self, c_int};
 use mem;
-use ptr;
-use sys::{cvt, cvt_r};
+use sync::atomic::{AtomicBool, ATOMIC_BOOL_INIT, Ordering};
 use sys::fd::FileDesc;
+use sys::{cvt, cvt_r};
 
 ////////////////////////////////////////////////////////////////////////////////
 // Anonymous pipes
@@ -23,6 +22,9 @@ use sys::fd::FileDesc;
 pub struct AnonPipe(FileDesc);
 
 pub fn anon_pipe() -> io::Result<(AnonPipe, AnonPipe)> {
+    weak! { fn pipe2(*mut c_int, c_int) -> c_int }
+    static INVALID: AtomicBool = ATOMIC_BOOL_INIT;
+
     let mut fds = [0; 2];
 
     // Unfortunately the only known way right now to create atomically set the
@@ -33,13 +35,26 @@ pub fn anon_pipe() -> io::Result<(AnonPipe, AnonPipe)> {
                 target_os = "freebsd",
                 target_os = "linux",
                 target_os = "netbsd",
-                target_os = "openbsd"))
+                target_os = "openbsd")) &&
+       !INVALID.load(Ordering::SeqCst)
     {
-        weak! { fn pipe2(*mut c_int, c_int) -> c_int }
+
         if let Some(pipe) = pipe2.get() {
-            cvt(unsafe { pipe(fds.as_mut_ptr(), libc::O_CLOEXEC) })?;
-            return Ok((AnonPipe(FileDesc::new(fds[0])),
-                       AnonPipe(FileDesc::new(fds[1]))));
+            // Note that despite calling a glibc function here we may still
+            // get ENOSYS. Glibc has `pipe2` since 2.9 and doesn't try to
+            // emulate on older kernels, so if you happen to be running on
+            // an older kernel you may see `pipe2` as a symbol but still not
+            // see the syscall.
+            match cvt(unsafe { pipe(fds.as_mut_ptr(), libc::O_CLOEXEC) }) {
+                Ok(_) => {
+                    return Ok((AnonPipe(FileDesc::new(fds[0])),
+                               AnonPipe(FileDesc::new(fds[1]))));
+                }
+                Err(ref e) if e.raw_os_error() == Some(libc::ENOSYS) => {
+                    INVALID.store(true, Ordering::SeqCst);
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
     cvt(unsafe { libc::pipe(fds.as_mut_ptr()) })?;
@@ -54,10 +69,6 @@ pub fn anon_pipe() -> io::Result<(AnonPipe, AnonPipe)> {
 impl AnonPipe {
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.read(buf)
-    }
-
-    pub fn read_to_end(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        self.0.read_to_end(buf)
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
@@ -80,16 +91,14 @@ pub fn read2(p1: AnonPipe,
     p1.set_nonblocking(true)?;
     p2.set_nonblocking(true)?;
 
-    let max = cmp::max(p1.raw(), p2.raw());
+    let mut fds: [libc::pollfd; 2] = unsafe { mem::zeroed() };
+    fds[0].fd = p1.raw();
+    fds[0].events = libc::POLLIN;
+    fds[1].fd = p2.raw();
+    fds[1].events = libc::POLLIN;
     loop {
-        // wait for either pipe to become readable using `select`
-        cvt_r(|| unsafe {
-            let mut read: libc::fd_set = mem::zeroed();
-            libc::FD_SET(p1.raw(), &mut read);
-            libc::FD_SET(p2.raw(), &mut read);
-            libc::select(max + 1, &mut read, ptr::null_mut(), ptr::null_mut(),
-                         ptr::null_mut())
-        })?;
+        // wait for either pipe to become readable using `poll`
+        cvt_r(|| unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) })?;
 
         // Read as much as we can from each pipe, ignoring EWOULDBLOCK or
         // EAGAIN. If we hit EOF, then this will happen because the underlying
@@ -109,11 +118,11 @@ pub fn read2(p1: AnonPipe,
                 }
             }
         };
-        if read(&p1, v1)? {
+        if fds[0].revents != 0 && read(&p1, v1)? {
             p2.set_nonblocking(false)?;
             return p2.read_to_end(v2).map(|_| ());
         }
-        if read(&p2, v2)? {
+        if fds[1].revents != 0 && read(&p2, v2)? {
             p1.set_nonblocking(false)?;
             return p1.read_to_end(v1).map(|_| ());
         }

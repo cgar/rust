@@ -70,8 +70,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             llvm::LLVMCreateBuilderInContext(ccx.llcx())
         };
         Builder {
-            llbuilder: llbuilder,
-            ccx: ccx,
+            llbuilder,
+            ccx,
         }
     }
 
@@ -477,24 +477,28 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         }
     }
 
-    pub fn alloca(&self, ty: Type, name: &str) -> ValueRef {
+    pub fn alloca(&self, ty: Type, name: &str, align: Option<u32>) -> ValueRef {
         let builder = Builder::with_ccx(self.ccx);
         builder.position_at_start(unsafe {
             llvm::LLVMGetFirstBasicBlock(self.llfn())
         });
-        builder.dynamic_alloca(ty, name)
+        builder.dynamic_alloca(ty, name, align)
     }
 
-    pub fn dynamic_alloca(&self, ty: Type, name: &str) -> ValueRef {
+    pub fn dynamic_alloca(&self, ty: Type, name: &str, align: Option<u32>) -> ValueRef {
         self.count_insn("alloca");
         unsafe {
-            if name.is_empty() {
+            let alloca = if name.is_empty() {
                 llvm::LLVMBuildAlloca(self.llbuilder, ty.to_ref(), noname())
             } else {
                 let name = CString::new(name).unwrap();
                 llvm::LLVMBuildAlloca(self.llbuilder, ty.to_ref(),
                                       name.as_ptr())
+            };
+            if let Some(align) = align {
+                llvm::LLVMSetAlignment(alloca, align as c_uint);
             }
+            alloca
         }
     }
 
@@ -627,7 +631,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         } else {
             let v = ixs.iter().map(|i| C_i32(self.ccx, *i as i32)).collect::<Vec<ValueRef>>();
             self.count_insn("gepi");
-            self.inbounds_gep(base, &v[..])
+            self.inbounds_gep(base, &v)
         }
     }
 
@@ -835,8 +839,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             let s = format!("{} ({})",
                             text,
                             self.ccx.sess().codemap().span_to_string(sp));
-            debug!("{}", &s[..]);
-            self.add_comment(&s[..]);
+            debug!("{}", s);
+            self.add_comment(&s);
         }
     }
 
@@ -1149,6 +1153,13 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         }
     }
 
+    pub fn set_invariant_load(&self, load: ValueRef) {
+        unsafe {
+            llvm::LLVMSetMetadata(load, llvm::MD_invariant_load as c_uint,
+                                  llvm::LLVMMDNodeInContext(self.ccx.llcx(), ptr::null(), 0));
+        }
+    }
+
     /// Returns the ptr value that should be used for storing `val`.
     fn check_store<'b>(&self,
                        val: ValueRef,
@@ -1181,7 +1192,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         }
 
         assert!(fn_ty.kind() == llvm::TypeKind::Function,
-                "builder::{} not passed a function", typ);
+                "builder::{} not passed a function, but {:?}", typ, fn_ty);
 
         let param_tys = fn_ty.func_params();
 

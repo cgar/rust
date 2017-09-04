@@ -11,7 +11,7 @@
 #![allow(non_upper_case_globals)]
 
 use llvm;
-use llvm::{TypeRef, Bool, False, True, TypeKind};
+use llvm::{ContextRef, TypeRef, Bool, False, True, TypeKind};
 use llvm::{Float, Double, X86_FP80, PPC_FP128, FP128};
 
 use context::CrateContext;
@@ -82,6 +82,10 @@ impl Type {
         ty!(llvm::LLVMInt8TypeInContext(ccx.llcx()))
     }
 
+    pub fn i8_llcx(llcx: ContextRef) -> Type {
+        ty!(llvm::LLVMInt8TypeInContext(llcx))
+    }
+
     pub fn i16(ccx: &CrateContext) -> Type {
         ty!(llvm::LLVMInt16TypeInContext(ccx.llcx()))
     }
@@ -121,6 +125,10 @@ impl Type {
 
     pub fn i8p(ccx: &CrateContext) -> Type {
         Type::i8(ccx).ptr_to()
+    }
+
+    pub fn i8p_llcx(llcx: ContextRef) -> Type {
+        Type::i8_llcx(llcx).ptr_to()
     }
 
     pub fn int(ccx: &CrateContext) -> Type {
@@ -229,19 +237,6 @@ impl Type {
         ty!(llvm::LLVMPointerType(self.to_ref(), 0))
     }
 
-    pub fn is_aggregate(&self) -> bool {
-        match self.kind() {
-            TypeKind::Struct | TypeKind::Array => true,
-            _ =>  false
-        }
-    }
-
-    pub fn is_packed(&self) -> bool {
-        unsafe {
-            llvm::LLVMIsPackedStruct(self.to_ref()) == True
-        }
-    }
-
     pub fn element_type(&self) -> Type {
         unsafe {
             Type::from_ref(llvm::LLVMGetElementType(self.to_ref()))
@@ -252,12 +247,6 @@ impl Type {
     pub fn vector_length(&self) -> usize {
         unsafe {
             llvm::LLVMGetVectorSize(self.to_ref()) as usize
-        }
-    }
-
-    pub fn array_length(&self) -> usize {
-        unsafe {
-            llvm::LLVMGetArrayLength(self.to_ref()) as usize
         }
     }
 
@@ -272,10 +261,6 @@ impl Type {
                                             elts.as_mut_ptr() as *mut TypeRef);
             elts
         }
-    }
-
-    pub fn return_type(&self) -> Type {
-        ty!(llvm::LLVMGetReturnType(self.to_ref()))
     }
 
     pub fn func_params(&self) -> Vec<Type> {
@@ -314,15 +299,6 @@ impl Type {
             I32 => Type::i32(cx),
             I64 => Type::i64(cx),
             I128 => Type::i128(cx),
-        }
-    }
-
-    pub fn from_primitive(ccx: &CrateContext, p: layout::Primitive) -> Type {
-        match p {
-            layout::Int(i) => Type::from_integer(ccx, i),
-            layout::F32 => Type::f32(ccx),
-            layout::F64 => Type::f64(ccx),
-            layout::Pointer => bug!("It is not possible to convert Pointer directly to Type.")
         }
     }
 }

@@ -14,41 +14,38 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![crate_name = "rustc"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
 #![deny(warnings)]
 
-#![feature(associated_consts)]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
 #![feature(conservative_impl_trait)]
 #![feature(const_fn)]
 #![feature(core_intrinsics)]
-#![cfg_attr(stage0,feature(field_init_shorthand))]
 #![feature(i128_type)]
-#![feature(libc)]
-#![feature(loop_break_value)]
+#![cfg_attr(windows, feature(libc))]
+#![feature(never_type)]
 #![feature(nonzero)]
-#![feature(pub_restricted)]
 #![feature(quote)]
 #![feature(rustc_diagnostic_macros)]
-#![feature(rustc_private)]
 #![feature(slice_patterns)]
-#![feature(staged_api)]
+#![feature(specialization)]
 #![feature(unboxed_closures)]
+#![feature(trace_macros)]
+#![feature(test)]
+
+#![recursion_limit="256"]
 
 extern crate arena;
 extern crate core;
 extern crate fmt_macros;
 extern crate getopts;
 extern crate graphviz;
+#[cfg(windows)]
 extern crate libc;
-extern crate rustc_llvm as llvm;
+extern crate owning_ref;
 extern crate rustc_back;
 extern crate rustc_data_structures;
 extern crate serialize;
@@ -58,8 +55,16 @@ extern crate rustc_errors as errors;
 #[macro_use] extern crate syntax;
 extern crate syntax_pos;
 #[macro_use] #[no_link] extern crate rustc_bitflags;
+extern crate jobserver;
 
 extern crate serialize as rustc_serialize; // used by deriving
+
+// Note that librustc doesn't actually depend on these crates, see the note in
+// `Cargo.toml` for this crate about why these are here.
+#[allow(unused_extern_crates)]
+extern crate flate2;
+#[allow(unused_extern_crates)]
+extern crate test;
 
 #[macro_use]
 mod macros;
@@ -71,11 +76,12 @@ pub mod diagnostics;
 pub mod cfg;
 pub mod dep_graph;
 pub mod hir;
+pub mod ich;
 pub mod infer;
 pub mod lint;
 
 pub mod middle {
-    pub mod astconv_util;
+    pub mod allocator;
     pub mod expr_use_visitor;
     pub mod const_val;
     pub mod cstore;

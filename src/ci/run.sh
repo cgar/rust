@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Copyright 2016 The Rust Project Developers. See the COPYRIGHT
 # file at the top-level directory of this distribution and at
 # http://rust-lang.org/COPYRIGHT.
@@ -20,10 +20,17 @@ if [ "$NO_CHANGE_USER" = "" ]; then
   fi
 fi
 
+ci_dir=`cd $(dirname $0) && pwd`
+source "$ci_dir/shared.sh"
+
+if [ "$TRAVIS" == "true" ] && [ "$TRAVIS_BRANCH" != "auto" ]; then
+    RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-quiet-tests"
+fi
+
 RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-sccache"
-RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-quiet-tests"
 RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --disable-manage-submodules"
 RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-locked-deps"
+RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-cargo-openssl-static"
 
 if [ "$DIST_SRC" = "" ]; then
   RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --disable-dist-src"
@@ -54,9 +61,23 @@ else
   fi
 fi
 
-set -ex
-
+travis_fold start configure
+travis_time_start
 $SRC/configure $RUST_CONFIGURE_ARGS
+travis_fold end configure
+travis_time_finish
+
+travis_fold start make-prepare
+travis_time_start
+retry make prepare
+travis_fold end make-prepare
+travis_time_finish
+
+travis_fold start check-bootstrap
+travis_time_start
+make check-bootstrap
+travis_fold end check-bootstrap
+travis_time_finish
 
 if [ "$TRAVIS_OS_NAME" = "osx" ]; then
     ncpus=$(sysctl -n hw.ncpu)
@@ -67,7 +88,18 @@ fi
 if [ ! -z "$SCRIPT" ]; then
   sh -x -c "$SCRIPT"
 else
-  make -j $ncpus tidy
-  make -j $ncpus
-  make $RUST_CHECK_TARGET -j $ncpus
+  do_make() {
+    travis_fold start "make-$1"
+    travis_time_start
+    echo "make -j $ncpus $1"
+    make -j $ncpus "$1"
+    local retval=$?
+    travis_fold end "make-$1"
+    travis_time_finish
+    return $retval
+  }
+
+  do_make tidy
+  do_make all
+  do_make "$RUST_CHECK_TARGET"
 fi

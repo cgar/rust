@@ -14,8 +14,9 @@
 #![cfg_attr(test, allow(dead_code))]
 #![unstable(issue = "0", feature = "windows_c")]
 
-use os::raw::{c_int, c_uint, c_ulong, c_long, c_longlong, c_ushort,};
-use os::raw::{c_char, c_ulonglong};
+use os::raw::{c_int, c_uint, c_ulong, c_long, c_longlong, c_ushort, c_char};
+#[cfg(target_arch = "x86_64")]
+use os::raw::c_ulonglong;
 use libc::{wchar_t, size_t, c_void};
 use ptr;
 
@@ -45,7 +46,7 @@ pub type SIZE_T = usize;
 pub type WORD = u16;
 pub type CHAR = c_char;
 pub type HCRYPTPROV = LONG_PTR;
-pub type ULONG_PTR = c_ulonglong;
+pub type ULONG_PTR = usize;
 pub type ULONG = c_ulong;
 #[cfg(target_arch = "x86_64")]
 pub type ULONGLONG = u64;
@@ -198,7 +199,10 @@ pub const ERROR_TIMEOUT: DWORD = 0x5B4;
 
 pub const INVALID_HANDLE_VALUE: HANDLE = !0 as HANDLE;
 
+pub const FACILITY_NT_BIT: DWORD = 0x1000_0000;
+
 pub const FORMAT_MESSAGE_FROM_SYSTEM: DWORD = 0x00001000;
+pub const FORMAT_MESSAGE_FROM_HMODULE: DWORD = 0x00000800;
 pub const FORMAT_MESSAGE_IGNORE_INSERTS: DWORD = 0x00000200;
 
 pub const TLS_OUT_OF_INDEXES: DWORD = 0xFFFFFFFF;
@@ -269,6 +273,7 @@ pub const FILE_END: DWORD = 2;
 
 pub const WAIT_OBJECT_0: DWORD = 0x00000000;
 pub const WAIT_TIMEOUT: DWORD = 258;
+pub const WAIT_FAILED: DWORD = 0xFFFFFFFF;
 
 #[cfg(target_env = "msvc")]
 pub const MAX_SYM_NAME: usize = 2000;
@@ -294,8 +299,10 @@ pub const PIPE_TYPE_BYTE: DWORD = 0x00000000;
 pub const PIPE_REJECT_REMOTE_CLIENTS: DWORD = 0x00000008;
 pub const PIPE_READMODE_BYTE: DWORD = 0x00000000;
 
+pub const FD_SETSIZE: usize = 64;
+
 #[repr(C)]
-#[cfg(target_arch = "x86")]
+#[cfg(not(target_pointer_width = "64"))]
 pub struct WSADATA {
     pub wVersion: WORD,
     pub wHighVersion: WORD,
@@ -306,7 +313,7 @@ pub struct WSADATA {
     pub lpVendorInfo: *mut u8,
 }
 #[repr(C)]
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_pointer_width = "64")]
 pub struct WSADATA {
     pub wVersion: WORD,
     pub wHighVersion: WORD,
@@ -762,6 +769,14 @@ pub struct FLOATING_SAVE_AREA {
     _Dummy: [u8; 512] // FIXME: Fill this out
 }
 
+// FIXME(#43348): This structure is used for backtrace only, and a fake
+// definition is provided here only to allow rustdoc to pass type-check. This
+// will not appear in the final documentation. This should be also defined for
+// other architectures supported by Windows such as ARM, and for historical
+// interest, maybe MIPS and PowerPC as well.
+#[cfg(all(dox, not(any(target_arch = "x86_64", target_arch = "x86"))))]
+pub enum CONTEXT {}
+
 #[repr(C)]
 pub struct SOCKADDR_STORAGE_LH {
     pub ss_family: ADDRESS_FAMILY,
@@ -832,6 +847,26 @@ pub struct CONSOLE_READCONSOLE_CONTROL {
     pub dwControlKeyState: ULONG,
 }
 pub type PCONSOLE_READCONSOLE_CONTROL = *mut CONSOLE_READCONSOLE_CONTROL;
+
+#[repr(C)]
+#[derive(Copy)]
+pub struct fd_set {
+    pub fd_count: c_uint,
+    pub fd_array: [SOCKET; FD_SETSIZE],
+}
+
+impl Clone for fd_set {
+    fn clone(&self) -> fd_set {
+        *self
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct timeval {
+    pub tv_sec: c_long,
+    pub tv_usec: c_long,
+}
 
 extern "system" {
     pub fn WSAStartup(wVersionRequested: WORD,
@@ -935,7 +970,6 @@ extern "system" {
                           args: *const c_void)
                           -> DWORD;
     pub fn TlsAlloc() -> DWORD;
-    pub fn TlsFree(dwTlsIndex: DWORD) -> BOOL;
     pub fn TlsGetValue(dwTlsIndex: DWORD) -> LPVOID;
     pub fn TlsSetValue(dwTlsIndex: DWORD, lpTlsvalue: LPVOID) -> BOOL;
     pub fn GetLastError() -> DWORD;
@@ -1122,6 +1156,11 @@ extern "system" {
                                lpOverlapped: LPOVERLAPPED,
                                lpNumberOfBytesTransferred: LPDWORD,
                                bWait: BOOL) -> BOOL;
+    pub fn select(nfds: c_int,
+                  readfds: *mut fd_set,
+                  writefds: *mut fd_set,
+                  exceptfds: *mut fd_set,
+                  timeout: *const timeval) -> c_int;
 }
 
 // Functions that aren't available on Windows XP, but we still use them and just

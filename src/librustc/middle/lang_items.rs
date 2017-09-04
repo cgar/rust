@@ -21,7 +21,6 @@
 
 pub use self::LangItem::*;
 
-use dep_graph::DepNode;
 use hir::map as hir_map;
 use session::Session;
 use hir::def_id::DefId;
@@ -157,10 +156,10 @@ impl<'a, 'tcx> LanguageItemCollector<'a, 'tcx> {
         $( item_refs.insert($name, $variant as usize); )*
 
         LanguageItemCollector {
-            session: session,
-            hir_map: hir_map,
+            session,
+            hir_map,
             items: LanguageItems::new(),
-            item_refs: item_refs,
+            item_refs,
         }
     }
 
@@ -224,9 +223,10 @@ impl<'a, 'tcx> LanguageItemCollector<'a, 'tcx> {
 
 pub fn extract(attrs: &[ast::Attribute]) -> Option<Symbol> {
     for attribute in attrs {
-        match attribute.value_str() {
-            Some(value) if attribute.check_name("lang") => return Some(value),
-            _ => {}
+        if attribute.check_name("lang") {
+            if let Some(value) = attribute.value_str() {
+                return Some(value)
+            }
         }
     }
 
@@ -236,7 +236,6 @@ pub fn extract(attrs: &[ast::Attribute]) -> Option<Symbol> {
 pub fn collect_language_items(session: &Session,
                               map: &hir_map::Map)
                               -> LanguageItems {
-    let _task = map.dep_graph.in_task(DepNode::CollectLanguageItems);
     let krate: &hir::Crate = map.krate();
     let mut collector = LanguageItemCollector::new(session, map);
     collector.collect(krate);
@@ -275,7 +274,9 @@ language_item_table! {
     SizedTraitLangItem,              "sized",                   sized_trait;
     UnsizeTraitLangItem,             "unsize",                  unsize_trait;
     CopyTraitLangItem,               "copy",                    copy_trait;
+    CloneTraitLangItem,              "clone",                   clone_trait;
     SyncTraitLangItem,               "sync",                    sync_trait;
+    FreezeTraitLangItem,             "freeze",                  freeze_trait;
 
     DropTraitLangItem,               "drop",                    drop_trait;
 
@@ -315,6 +316,9 @@ language_item_table! {
     FnMutTraitLangItem,              "fn_mut",                  fn_mut_trait;
     FnOnceTraitLangItem,             "fn_once",                 fn_once_trait;
 
+    GeneratorStateLangItem,          "generator_state",         gen_state;
+    GeneratorTraitLangItem,          "generator",               gen_trait;
+
     EqTraitLangItem,                 "eq",                      eq_trait;
     OrdTraitLangItem,                "ord",                     ord_trait;
 
@@ -335,7 +339,7 @@ language_item_table! {
 
     ExchangeMallocFnLangItem,        "exchange_malloc",         exchange_malloc_fn;
     BoxFreeFnLangItem,               "box_free",                box_free_fn;
-    StrDupUniqFnLangItem,            "strdup_uniq",             strdup_uniq_fn;
+    DropInPlaceFnLangItem,             "drop_in_place",           drop_in_place_fn;
 
     StartFnLangItem,                 "start",                   start_fn;
 
@@ -354,8 +358,6 @@ language_item_table! {
     CovariantLifetimeItem,           "covariant_lifetime",      covariant_lifetime;
     ContravariantLifetimeItem,       "contravariant_lifetime",  contravariant_lifetime;
     InvariantLifetimeItem,           "invariant_lifetime",      invariant_lifetime;
-
-    NoCopyItem,                      "no_copy_bound",           no_copy_bound;
 
     NonZeroItem,                     "non_zero",                non_zero;
 

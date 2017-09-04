@@ -19,7 +19,7 @@
 
 use fmt;
 use ffi::OsString;
-use io::{self, SeekFrom, Seek, Read, Write};
+use io::{self, SeekFrom, Seek, Read, Initializer, Write};
 use path::{Path, PathBuf};
 use sys::fs as fs_imp;
 use sys_common::{AsInnerMut, FromInner, AsInner, IntoInner};
@@ -28,7 +28,7 @@ use time::SystemTime;
 /// A reference to an open file on the filesystem.
 ///
 /// An instance of a `File` can be read and/or written depending on what options
-/// it was opened with. Files also implement `Seek` to alter the logical cursor
+/// it was opened with. Files also implement [`Seek`] to alter the logical cursor
 /// that the file contains internally.
 ///
 /// Files are automatically closed when they go out of scope.
@@ -48,7 +48,7 @@ use time::SystemTime;
 /// # }
 /// ```
 ///
-/// Read the contents of a file into a `String`:
+/// Read the contents of a file into a [`String`]:
 ///
 /// ```no_run
 /// use std::fs::File;
@@ -81,6 +81,8 @@ use time::SystemTime;
 /// # }
 /// ```
 ///
+/// [`Seek`]: ../io/trait.Seek.html
+/// [`String`]: ../string/struct.String.html
 /// [`Read`]: ../io/trait.Read.html
 /// [`BufReader<R>`]: ../io/struct.BufReader.html
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -104,19 +106,19 @@ pub struct Metadata(fs_imp::FileAttr);
 /// Iterator over the entries in a directory.
 ///
 /// This iterator is returned from the [`read_dir`] function of this module and
-/// will yield instances of `io::Result<DirEntry>`. Through a [`DirEntry`]
+/// will yield instances of [`io::Result`]`<`[`DirEntry`]`>`. Through a [`DirEntry`]
 /// information like the entry's path and possibly other metadata can be
 /// learned.
 ///
-/// [`read_dir`]: fn.read_dir.html
-/// [`DirEntry`]: struct.DirEntry.html
-///
 /// # Errors
 ///
-/// This [`io::Result`] will be an `Err` if there's some sort of intermittent
+/// This [`io::Result`] will be an [`Err`] if there's some sort of intermittent
 /// IO error during iteration.
 ///
+/// [`read_dir`]: fn.read_dir.html
+/// [`DirEntry`]: struct.DirEntry.html
 /// [`io::Result`]: ../io/type.Result.html
+/// [`Err`]: ../result/enum.Result.html#variant.Err
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Debug)]
 pub struct ReadDir(fs_imp::ReadDir);
@@ -142,14 +144,14 @@ pub struct DirEntry(fs_imp::DirEntry);
 /// [`File::open`]: struct.File.html#method.open
 /// [`File::create`]: struct.File.html#method.create
 ///
-/// Generally speaking, when using `OpenOptions`, you'll first call [`new()`],
-/// then chain calls to methods to set each option, then call [`open()`],
+/// Generally speaking, when using `OpenOptions`, you'll first call [`new`],
+/// then chain calls to methods to set each option, then call [`open`],
 /// passing the path of the file you're trying to open. This will give you a
 /// [`io::Result`][result] with a [`File`][file] inside that you can further
 /// operate on.
 ///
-/// [`new()`]: struct.OpenOptions.html#method.new
-/// [`open()`]: struct.OpenOptions.html#method.open
+/// [`new`]: struct.OpenOptions.html#method.new
+/// [`open`]: struct.OpenOptions.html#method.open
 /// [result]: ../io/type.Result.html
 /// [file]: struct.File.html
 ///
@@ -446,8 +448,10 @@ impl Read for File {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.read(buf)
     }
-    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        self.inner.read_to_end(buf)
+
+    #[inline]
+    unsafe fn initializer(&self) -> Initializer {
+        Initializer::nop()
     }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -468,8 +472,10 @@ impl<'a> Read for &'a File {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.read(buf)
     }
-    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        self.inner.read_to_end(buf)
+
+    #[inline]
+    unsafe fn initializer(&self) -> Initializer {
+        Initializer::nop()
     }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -649,15 +655,29 @@ impl OpenOptions {
     /// # Errors
     ///
     /// This function will return an error under a number of different
-    /// circumstances, to include but not limited to:
+    /// circumstances. Some of these error conditions are listed here, together
+    /// with their [`ErrorKind`]. The mapping to [`ErrorKind`]s is not part of
+    /// the compatibility contract of the function, especially the `Other` kind
+    /// might change to more specific kinds in the future.
     ///
-    /// * Opening a file that does not exist without setting `create` or
-    ///   `create_new`.
-    /// * Attempting to open a file with access that the user lacks
-    ///   permissions for
-    /// * Filesystem-level errors (full disk, etc)
-    /// * Invalid combinations of open options (truncate without write access,
-    ///   no access mode set, etc)
+    /// * [`NotFound`]: The specified file does not exist and neither `create`
+    ///   or `create_new` is set.
+    /// * [`NotFound`]: One of the directory components of the file path does
+    ///   not exist.
+    /// * [`PermissionDenied`]: The user lacks permission to get the specified
+    ///   access rights for the file.
+    /// * [`PermissionDenied`]: The user lacks permission to open one of the
+    ///   directory components of the specified path.
+    /// * [`AlreadyExists`]: `create_new` was specified and the file already
+    ///   exists.
+    /// * [`InvalidInput`]: Invalid combinations of open options (truncate
+    ///   without write access, no access mode set, etc.).
+    /// * [`Other`]: One of the directory components of the specified file path
+    ///   was not, in fact, a directory.
+    /// * [`Other`]: Filesystem-level errors: full disk, write permission
+    ///   requested on a read-only file system, exceeded disk quota, too many
+    ///   open files, too long filename, too many symbolic links in the
+    ///   specified path (Unix-like systems only), etc.
     ///
     /// # Examples
     ///
@@ -666,6 +686,13 @@ impl OpenOptions {
     ///
     /// let file = OpenOptions::new().open("foo.txt");
     /// ```
+    ///
+    /// [`ErrorKind`]: ../io/enum.ErrorKind.html
+    /// [`AlreadyExists`]: ../io/enum.ErrorKind.html#variant.AlreadyExists
+    /// [`InvalidInput`]: ../io/enum.ErrorKind.html#variant.InvalidInput
+    /// [`NotFound`]: ../io/enum.ErrorKind.html#variant.NotFound
+    /// [`Other`]: ../io/enum.ErrorKind.html#variant.Other
+    /// [`PermissionDenied`]: ../io/enum.ErrorKind.html#variant.PermissionDenied
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
         self._open(path.as_ref())
@@ -889,7 +916,7 @@ impl AsInner<fs_imp::FileAttr> for Metadata {
 }
 
 impl Permissions {
-    /// Returns whether these permissions describe a readonly file.
+    /// Returns whether these permissions describe a readonly (unwritable) file.
     ///
     /// # Examples
     ///
@@ -907,7 +934,11 @@ impl Permissions {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn readonly(&self) -> bool { self.0.readonly() }
 
-    /// Modifies the readonly flag for this set of permissions.
+    /// Modifies the readonly flag for this set of permissions. If the
+    /// `readonly` argument is `true`, using the resulting `Permission` will
+    /// update file permissions to forbid writing. Conversely, if it's `false`,
+    /// using the resulting `Permission` will update file permissions to allow
+    /// writing.
     ///
     /// This operation does **not** modify the filesystem. To modify the
     /// filesystem use the `fs::set_permissions` function.
@@ -1176,6 +1207,7 @@ impl AsInner<fs_imp::DirEntry> for DirEntry {
 /// This function currently corresponds to the `unlink` function on Unix
 /// and the `DeleteFile` function on Windows.
 /// Note that, this [may change in the future][changes].
+///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
 /// # Errors
@@ -1212,6 +1244,7 @@ pub fn remove_file<P: AsRef<Path>>(path: P) -> io::Result<()> {
 /// This function currently corresponds to the `stat` function on Unix
 /// and the `GetFileAttributesEx` function on Windows.
 /// Note that, this [may change in the future][changes].
+///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
 /// # Errors
@@ -1245,6 +1278,7 @@ pub fn metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
 /// This function currently corresponds to the `lstat` function on Unix
 /// and the `GetFileAttributesEx` function on Windows.
 /// Note that, this [may change in the future][changes].
+///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
 /// # Errors
@@ -1287,6 +1321,7 @@ pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
 /// on Windows, `from` can be anything, but `to` must *not* be a directory.
 ///
 /// Note that, this [may change in the future][changes].
+///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
 /// # Errors
@@ -1330,6 +1365,7 @@ pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> 
 /// `O_CLOEXEC` is set for returned file descriptors.
 /// On Windows, this function currently corresponds to `CopyFileEx`.
 /// Note that, this [may change in the future][changes].
+///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
 /// # Errors
@@ -1366,6 +1402,7 @@ pub fn copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<u64> {
 /// This function currently corresponds to the `link` function on Unix
 /// and the `CreateHardLink` function on Windows.
 /// Note that, this [may change in the future][changes].
+///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
 /// # Errors
@@ -1424,6 +1461,7 @@ pub fn soft_link<P: AsRef<Path>, Q: AsRef<Path>>(src: P, dst: Q) -> io::Result<(
 /// and the `CreateFile` function with `FILE_FLAG_OPEN_REPARSE_POINT` and
 /// `FILE_FLAG_BACKUP_SEMANTICS` flags on Windows.
 /// Note that, this [may change in the future][changes].
+///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
 /// # Errors
@@ -1457,6 +1495,7 @@ pub fn read_link<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 /// This function currently corresponds to the `realpath` function on Unix
 /// and the `CreateFile` and `GetFinalPathNameByHandle` functions on Windows.
 /// Note that, this [may change in the future][changes].
+///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
 /// # Errors
@@ -1489,6 +1528,7 @@ pub fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 /// This function currently corresponds to the `mkdir` function on Unix
 /// and the `CreateDirectory` function on Windows.
 /// Note that, this [may change in the future][changes].
+///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
 /// # Errors
@@ -1522,6 +1562,7 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 /// This function currently corresponds to the `mkdir` function on Unix
 /// and the `CreateDirectory` function on Windows.
 /// Note that, this [may change in the future][changes].
+///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
 /// # Errors
@@ -1533,6 +1574,12 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 /// does not already exist and it could not be created otherwise. The specific
 /// error conditions for when a directory is being created (after it is
 /// determined to not exist) are outlined by `fs::create_dir`.
+///
+/// Notable exception is made for situations where any of the directories
+/// specified in the `path` could not be created as it was being created concurrently.
+/// Such cases are considered success. In other words: calling `create_dir_all`
+/// concurrently from multiple threads or processes is guaranteed to not fail
+/// due to race itself.
 ///
 /// # Examples
 ///
@@ -1556,6 +1603,7 @@ pub fn create_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
 /// This function currently corresponds to the `rmdir` function on Unix
 /// and the `RemoveDirectory` function on Windows.
 /// Note that, this [may change in the future][changes].
+///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
 /// # Errors
@@ -1593,6 +1641,7 @@ pub fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 /// and the `FindFirstFile`, `GetFileAttributesEx`, `DeleteFile`, and `RemoveDirectory` functions
 /// on Windows.
 /// Note that, this [may change in the future][changes].
+///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
 /// # Errors
@@ -1627,6 +1676,7 @@ pub fn remove_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
 /// This function currently corresponds to the `opendir` function on Unix
 /// and the `FindFirstFile` function on Windows.
 /// Note that, this [may change in the future][changes].
+///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
 /// # Errors
@@ -1673,6 +1723,7 @@ pub fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<ReadDir> {
 /// This function currently corresponds to the `chmod` function on Unix
 /// and the `SetFileAttributes` function on Windows.
 /// Note that, this [may change in the future][changes].
+///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
 /// # Errors
@@ -1720,9 +1771,9 @@ impl DirBuilder {
         }
     }
 
-    /// Indicate that directories create should be created recursively, creating
-    /// all parent directories if they do not exist with the same security and
-    /// permissions settings.
+    /// Indicates that directories should be created recursively, creating all
+    /// parent directories. Parents that do not exist are created with the same
+    /// security and permissions settings.
     ///
     /// This option defaults to `false`.
     ///
@@ -1742,6 +1793,9 @@ impl DirBuilder {
 
     /// Create the specified directory with the options configured in this
     /// builder.
+    ///
+    /// It is considered an error if the directory already exists unless
+    /// recursive mode is enabled.
     ///
     /// # Examples
     ///
@@ -1769,11 +1823,25 @@ impl DirBuilder {
     }
 
     fn create_dir_all(&self, path: &Path) -> io::Result<()> {
-        if path == Path::new("") || path.is_dir() { return Ok(()) }
-        if let Some(p) = path.parent() {
-            self.create_dir_all(p)?
+        if path == Path::new("") {
+            return Ok(())
         }
-        self.inner.mkdir(path)
+
+        match self.inner.mkdir(path) {
+            Ok(()) => return Ok(()),
+            Err(ref e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(_) if path.is_dir() => return Ok(()),
+            Err(e) => return Err(e),
+        }
+        match path.parent() {
+            Some(p) => try!(self.create_dir_all(p)),
+            None => return Err(io::Error::new(io::ErrorKind::Other, "failed to create whole tree")),
+        }
+        match self.inner.mkdir(path) {
+            Ok(()) => Ok(()),
+            Err(_) if path.is_dir() => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -1793,6 +1861,7 @@ mod tests {
     use rand::{StdRng, Rng};
     use str;
     use sys_common::io::test::{TempDir, tmpdir};
+    use thread;
 
     #[cfg(windows)]
     use os::windows::fs::{symlink_dir, symlink_file};
@@ -2261,8 +2330,39 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_recursive_mkdir() {
+        for _ in 0..100 {
+            let dir = tmpdir();
+            let mut dir = dir.join("a");
+            for _ in 0..40 {
+                dir = dir.join("a");
+            }
+            let mut join = vec!();
+            for _ in 0..8 {
+                let dir = dir.clone();
+                join.push(thread::spawn(move || {
+                    check!(fs::create_dir_all(&dir));
+                }))
+            }
+
+            // No `Display` on result of `join()`
+            join.drain(..).map(|join| join.join().unwrap()).count();
+        }
+    }
+
+    #[test]
     fn recursive_mkdir_slash() {
-        check!(fs::create_dir_all(&Path::new("/")));
+        check!(fs::create_dir_all(Path::new("/")));
+    }
+
+    #[test]
+    fn recursive_mkdir_dot() {
+        check!(fs::create_dir_all(Path::new(".")));
+    }
+
+    #[test]
+    fn recursive_mkdir_empty() {
+        check!(fs::create_dir_all(Path::new("")));
     }
 
     #[test]
@@ -2343,7 +2443,7 @@ mod tests {
 
         let tmpdir = tmpdir();
         let unicode = tmpdir.path();
-        let unicode = unicode.join(&format!("test-각丁ー再见"));
+        let unicode = unicode.join("test-각丁ー再见");
         check!(fs::create_dir(&unicode));
         assert!(unicode.exists());
         assert!(!Path::new("test/unicode-bogus-path-각丁ー再见").exists());

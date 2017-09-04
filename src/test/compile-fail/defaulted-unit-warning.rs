@@ -8,9 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![allow(dead_code)]
-#![allow(unreachable_code)]
-#![deny(resolve_trait_on_defaulted_unit)]
+#![allow(unused)]
 
 trait Deserialize: Sized {
     fn deserialize() -> Result<Self, String>;
@@ -20,16 +18,6 @@ impl Deserialize for () {
     fn deserialize() -> Result<(), String> {
         Ok(())
     }
-}
-
-fn doit() -> Result<(), String> {
-    let _ = match Deserialize::deserialize() {
-        //~^ ERROR code relies on type
-        //~| WARNING previously accepted
-        Ok(x) => x,
-        Err(e) => return Err(e),
-    };
-    Ok(())
 }
 
 trait ImplementedForUnitButNotNever {}
@@ -46,6 +34,5 @@ fn smeg() {
 }
 
 fn main() {
-    let _ = doit();
+    smeg();
 }
-

@@ -13,42 +13,46 @@
 use build::{BlockAnd, BlockAndExtension, Builder};
 use build::expr::category::Category;
 use hair::*;
+use rustc::middle::region;
 use rustc::mir::*;
 
 impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     /// Compile `expr` into a fresh temporary. This is used when building
     /// up rvalues so as to freeze the value that will be consumed.
-    pub fn as_temp<M>(&mut self, block: BasicBlock, expr: M) -> BlockAnd<Lvalue<'tcx>>
+    pub fn as_temp<M>(&mut self,
+                      block: BasicBlock,
+                      temp_lifetime: Option<region::Scope>,
+                      expr: M)
+                      -> BlockAnd<Lvalue<'tcx>>
         where M: Mirror<'tcx, Output = Expr<'tcx>>
     {
         let expr = self.hir.mirror(expr);
-        self.expr_as_temp(block, expr)
+        self.expr_as_temp(block, temp_lifetime, expr)
     }
 
-    fn expr_as_temp(&mut self, mut block: BasicBlock, expr: Expr<'tcx>) -> BlockAnd<Lvalue<'tcx>> {
-        debug!("expr_as_temp(block={:?}, expr={:?})", block, expr);
+    fn expr_as_temp(&mut self,
+                    mut block: BasicBlock,
+                    temp_lifetime: Option<region::Scope>,
+                    expr: Expr<'tcx>)
+                    -> BlockAnd<Lvalue<'tcx>> {
+        debug!("expr_as_temp(block={:?}, temp_lifetime={:?}, expr={:?})",
+               block, temp_lifetime, expr);
         let this = self;
 
-        if let ExprKind::Scope { extent, value } = expr.kind {
-            return this.in_scope(extent, block, |this| this.as_temp(block, value));
+        let expr_span = expr.span;
+        let source_info = this.source_info(expr_span);
+        if let ExprKind::Scope { region_scope, value } = expr.kind {
+            return this.in_scope((region_scope, source_info), block, |this| {
+                this.as_temp(block, temp_lifetime, value)
+            });
         }
 
         let expr_ty = expr.ty.clone();
-        let temp = this.temp(expr_ty.clone());
-        let temp_lifetime = expr.temp_lifetime;
-        let expr_span = expr.span;
-        let source_info = this.source_info(expr_span);
+        let temp = this.temp(expr_ty.clone(), expr_span);
 
-        if expr.temp_lifetime_was_shrunk && this.hir.needs_drop(expr_ty) {
-            this.hir.tcx().sess.span_warn(
-                expr_span,
-                "this temporary used to live longer - see issue #39283 \
-(https://github.com/rust-lang/rust/issues/39283)");
-        }
-
-        if temp_lifetime.is_some() {
+        if !expr_ty.is_never() {
             this.cfg.push(block, Statement {
-                source_info: source_info,
+                source_info,
                 kind: StatementKind::StorageLive(temp.clone())
             });
         }

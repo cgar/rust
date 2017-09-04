@@ -12,9 +12,10 @@
 
 extern crate filetime;
 
-use std::fs;
-use std::process::{Command, Stdio};
+use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::{fs, env};
 
 use filetime::FileTime;
 
@@ -40,17 +41,49 @@ pub fn run(cmd: &mut Command) {
 }
 
 pub fn run_silent(cmd: &mut Command) {
+    if !try_run_silent(cmd) {
+        std::process::exit(1);
+    }
+}
+
+pub fn try_run_silent(cmd: &mut Command) -> bool {
     let status = match cmd.status() {
         Ok(status) => status,
         Err(e) => fail(&format!("failed to execute command: {:?}\nerror: {}",
                                 cmd, e)),
     };
     if !status.success() {
-        fail(&format!("command did not execute successfully: {:?}\n\
-                       expected success, got: {}",
-                      cmd,
-                      status));
+        println!("\n\ncommand did not execute successfully: {:?}\n\
+                  expected success, got: {}\n\n",
+                 cmd,
+                 status);
     }
+    status.success()
+}
+
+pub fn run_suppressed(cmd: &mut Command) {
+    if !try_run_suppressed(cmd) {
+        std::process::exit(1);
+    }
+}
+
+pub fn try_run_suppressed(cmd: &mut Command) -> bool {
+    let output = match cmd.output() {
+        Ok(status) => status,
+        Err(e) => fail(&format!("failed to execute command: {:?}\nerror: {}",
+                                cmd, e)),
+    };
+    if !output.status.success() {
+        println!("\n\ncommand did not execute successfully: {:?}\n\
+                  expected success, got: {}\n\n\
+                  stdout ----\n{}\n\
+                  stderr ----\n{}\n\n",
+                 cmd,
+                 output.status,
+                 String::from_utf8_lossy(&output.stdout),
+                 String::from_utf8_lossy(&output.stderr));
+    }
+    output.status.success()
 }
 
 pub fn gnu_target(target: &str) -> String {
@@ -146,6 +179,69 @@ pub fn up_to_date(src: &Path, dst: &Path) -> bool {
     } else {
         FileTime::from_last_modification_time(&meta) <= threshold
     }
+}
+
+#[must_use]
+pub struct NativeLibBoilerplate {
+    pub src_dir: PathBuf,
+    pub out_dir: PathBuf,
+}
+
+impl Drop for NativeLibBoilerplate {
+    fn drop(&mut self) {
+        t!(File::create(self.out_dir.join("rustbuild.timestamp")));
+    }
+}
+
+// Perform standard preparations for native libraries that are build only once for all stages.
+// Emit rerun-if-changed and linking attributes for Cargo, check if any source files are
+// updated, calculate paths used later in actual build with CMake/make or C/C++ compiler.
+// If Err is returned, then everything is up-to-date and further build actions can be skipped.
+// Timestamps are created automatically when the result of `native_lib_boilerplate` goes out
+// of scope, so all the build actions should be completed until then.
+pub fn native_lib_boilerplate(src_name: &str,
+                              out_name: &str,
+                              link_name: &str,
+                              search_subdir: &str)
+                              -> Result<NativeLibBoilerplate, ()> {
+    let current_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let src_dir = current_dir.join("..").join(src_name);
+    rerun_if_changed_anything_in_dir(&src_dir);
+
+    let out_dir = env::var_os("RUSTBUILD_NATIVE_DIR").unwrap_or(env::var_os("OUT_DIR").unwrap());
+    let out_dir = PathBuf::from(out_dir).join(out_name);
+    t!(fs::create_dir_all(&out_dir));
+    if link_name.contains('=') {
+        println!("cargo:rustc-link-lib={}", link_name);
+    } else {
+        println!("cargo:rustc-link-lib=static={}", link_name);
+    }
+    println!("cargo:rustc-link-search=native={}", out_dir.join(search_subdir).display());
+
+    let timestamp = out_dir.join("rustbuild.timestamp");
+    if !up_to_date(Path::new("build.rs"), &timestamp) || !up_to_date(&src_dir, &timestamp) {
+        Ok(NativeLibBoilerplate { src_dir: src_dir, out_dir: out_dir })
+    } else {
+        Err(())
+    }
+}
+
+pub fn sanitizer_lib_boilerplate(sanitizer_name: &str) -> Result<NativeLibBoilerplate, ()> {
+    let (link_name, search_path) = match &*env::var("TARGET").unwrap() {
+        "x86_64-unknown-linux-gnu" => (
+            format!("clang_rt.{}-x86_64", sanitizer_name),
+            "build/lib/linux",
+        ),
+        "x86_64-apple-darwin" => (
+            format!("dylib=clang_rt.{}_osx_dynamic", sanitizer_name),
+            "build/lib/darwin",
+        ),
+        _ => return Err(()),
+    };
+    native_lib_boilerplate("libcompiler_builtins/compiler-rt",
+                           sanitizer_name,
+                           &link_name,
+                           search_path)
 }
 
 fn dir_up_to_date(src: &Path, threshold: &FileTime) -> bool {

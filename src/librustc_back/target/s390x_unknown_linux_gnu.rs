@@ -8,6 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use LinkerFlavor;
 use target::{Target, TargetResult};
 
 pub fn target() -> TargetResult {
@@ -20,7 +21,7 @@ pub fn target() -> TargetResult {
     base.features = "-vector".to_string();
     base.max_atomic_width = Some(64);
     // see #36994
-    base.exe_allocation_crate = "alloc_system".to_string();
+    base.exe_allocation_crate = None;
 
     Ok(Target {
         llvm_target: "s390x-unknown-linux-gnu".to_string(),
@@ -31,6 +32,7 @@ pub fn target() -> TargetResult {
         target_os: "linux".to_string(),
         target_env: "gnu".to_string(),
         target_vendor: "unknown".to_string(),
+        linker_flavor: LinkerFlavor::Gcc,
         options: base,
     })
 }

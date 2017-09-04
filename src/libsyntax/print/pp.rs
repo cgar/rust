@@ -11,7 +11,7 @@
 //! This pretty-printer is a direct reimplementation of Philip Karlton's
 //! Mesa pretty-printer, as described in appendix A of
 //!
-//! ````ignore
+//! ````text
 //! STAN-CS-79-770: "Pretty Printing", by Derek C. Oppen.
 //! Stanford Department of Computer Science, 1979.
 //! ````
@@ -113,22 +113,22 @@
 //! between using 'left' and 'right' terms to denote the wrapped-to-ring-buffer
 //! and point-in-infinite-stream senses freely.
 //!
-//! There is a parallel ring buffer, 'size', that holds the calculated size of
+//! There is a parallel ring buffer, `size`, that holds the calculated size of
 //! each token. Why calculated? Because for Begin/End pairs, the "size"
 //! includes everything between the pair. That is, the "size" of Begin is
 //! actually the sum of the sizes of everything between Begin and the paired
-//! End that follows. Since that is arbitrarily far in the future, 'size' is
+//! End that follows. Since that is arbitrarily far in the future, `size` is
 //! being rewritten regularly while the printer runs; in fact most of the
-//! machinery is here to work out 'size' entries on the fly (and give up when
+//! machinery is here to work out `size` entries on the fly (and give up when
 //! they're so obviously over-long that "infinity" is a good enough
 //! approximation for purposes of line breaking).
 //!
 //! The "input side" of the printer is managed as an abstract process called
-//! SCAN, which uses 'scan_stack', to manage calculating 'size'. SCAN is, in
+//! SCAN, which uses `scan_stack`, to manage calculating `size`. SCAN is, in
 //! other words, the process of calculating 'size' entries.
 //!
 //! The "output side" of the printer is managed by an abstract process called
-//! PRINT, which uses 'print_stack', 'margin' and 'space' to figure out what to
+//! PRINT, which uses `print_stack`, `margin` and `space` to figure out what to
 //! do with each token/size pair it consumes as it goes. It's trying to consume
 //! the entire buffered window, but can't output anything until the size is >=
 //! 0 (sizes are set to negative while they're pending calculation).
@@ -246,7 +246,7 @@ pub fn mk_printer<'a>(out: Box<io::Write+'a>, linewidth: usize) -> Printer<'a> {
     let n: usize = 55 * linewidth;
     debug!("mk_printer {}", linewidth);
     Printer {
-        out: out,
+        out,
         buf_len: n,
         margin: linewidth as isize,
         space: linewidth as isize,
@@ -262,7 +262,7 @@ pub fn mk_printer<'a>(out: Box<io::Write+'a>, linewidth: usize) -> Printer<'a> {
 }
 
 pub struct Printer<'a> {
-    pub out: Box<io::Write+'a>,
+    out: Box<io::Write+'a>,
     buf_len: usize,
     /// Width of lines we're constrained to
     margin: isize,
@@ -409,7 +409,7 @@ impl<'a> Printer<'a> {
     pub fn advance_right(&mut self) {
         self.right += 1;
         self.right %= self.buf_len;
-        assert!(self.right != self.left);
+        assert_ne!(self.right, self.left);
     }
     pub fn advance_left(&mut self) -> io::Result<()> {
         debug!("advance_left Vec<{},{}>, sizeof({})={}", self.left, self.right,
@@ -577,75 +577,75 @@ impl<'a> Printer<'a> {
           }
         }
     }
-}
 
-// Convenience functions to talk to the printer.
+    // Convenience functions to talk to the printer.
 
-/// "raw box"
-pub fn rbox(p: &mut Printer, indent: usize, b: Breaks) -> io::Result<()> {
-    p.pretty_print(Token::Begin(BeginToken {
-        offset: indent as isize,
-        breaks: b
-    }))
-}
+    /// "raw box"
+    pub fn rbox(&mut self, indent: usize, b: Breaks) -> io::Result<()> {
+        self.pretty_print(Token::Begin(BeginToken {
+            offset: indent as isize,
+            breaks: b
+        }))
+    }
 
-/// Inconsistent breaking box
-pub fn ibox(p: &mut Printer, indent: usize) -> io::Result<()> {
-    rbox(p, indent, Breaks::Inconsistent)
-}
+    /// Inconsistent breaking box
+    pub fn ibox(&mut self, indent: usize) -> io::Result<()> {
+        self.rbox(indent, Breaks::Inconsistent)
+    }
 
-/// Consistent breaking box
-pub fn cbox(p: &mut Printer, indent: usize) -> io::Result<()> {
-    rbox(p, indent, Breaks::Consistent)
-}
+    /// Consistent breaking box
+    pub fn cbox(&mut self, indent: usize) -> io::Result<()> {
+        self.rbox(indent, Breaks::Consistent)
+    }
 
-pub fn break_offset(p: &mut Printer, n: usize, off: isize) -> io::Result<()> {
-    p.pretty_print(Token::Break(BreakToken {
-        offset: off,
-        blank_space: n as isize
-    }))
-}
+    pub fn break_offset(&mut self, n: usize, off: isize) -> io::Result<()> {
+        self.pretty_print(Token::Break(BreakToken {
+            offset: off,
+            blank_space: n as isize
+        }))
+    }
 
-pub fn end(p: &mut Printer) -> io::Result<()> {
-    p.pretty_print(Token::End)
-}
+    pub fn end(&mut self) -> io::Result<()> {
+        self.pretty_print(Token::End)
+    }
 
-pub fn eof(p: &mut Printer) -> io::Result<()> {
-    p.pretty_print(Token::Eof)
-}
+    pub fn eof(&mut self) -> io::Result<()> {
+        self.pretty_print(Token::Eof)
+    }
 
-pub fn word(p: &mut Printer, wrd: &str) -> io::Result<()> {
-    p.pretty_print(Token::String(wrd.to_string(), wrd.len() as isize))
-}
+    pub fn word(&mut self, wrd: &str) -> io::Result<()> {
+        self.pretty_print(Token::String(wrd.to_string(), wrd.len() as isize))
+    }
 
-pub fn huge_word(p: &mut Printer, wrd: &str) -> io::Result<()> {
-    p.pretty_print(Token::String(wrd.to_string(), SIZE_INFINITY))
-}
+    pub fn huge_word(&mut self, wrd: &str) -> io::Result<()> {
+        self.pretty_print(Token::String(wrd.to_string(), SIZE_INFINITY))
+    }
 
-pub fn zero_word(p: &mut Printer, wrd: &str) -> io::Result<()> {
-    p.pretty_print(Token::String(wrd.to_string(), 0))
-}
+    pub fn zero_word(&mut self, wrd: &str) -> io::Result<()> {
+        self.pretty_print(Token::String(wrd.to_string(), 0))
+    }
 
-pub fn spaces(p: &mut Printer, n: usize) -> io::Result<()> {
-    break_offset(p, n, 0)
-}
+    fn spaces(&mut self, n: usize) -> io::Result<()> {
+        self.break_offset(n, 0)
+    }
 
-pub fn zerobreak(p: &mut Printer) -> io::Result<()> {
-    spaces(p, 0)
-}
+    pub fn zerobreak(&mut self) -> io::Result<()> {
+        self.spaces(0)
+    }
 
-pub fn space(p: &mut Printer) -> io::Result<()> {
-    spaces(p, 1)
-}
+    pub fn space(&mut self) -> io::Result<()> {
+        self.spaces(1)
+    }
 
-pub fn hardbreak(p: &mut Printer) -> io::Result<()> {
-    spaces(p, SIZE_INFINITY as usize)
-}
+    pub fn hardbreak(&mut self) -> io::Result<()> {
+        self.spaces(SIZE_INFINITY as usize)
+    }
 
-pub fn hardbreak_tok_offset(off: isize) -> Token {
-    Token::Break(BreakToken {offset: off, blank_space: SIZE_INFINITY})
-}
+    pub fn hardbreak_tok_offset(off: isize) -> Token {
+        Token::Break(BreakToken {offset: off, blank_space: SIZE_INFINITY})
+    }
 
-pub fn hardbreak_tok() -> Token {
-    hardbreak_tok_offset(0)
+    pub fn hardbreak_tok() -> Token {
+        Self::hardbreak_tok_offset(0)
+    }
 }

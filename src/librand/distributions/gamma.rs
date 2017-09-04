@@ -103,12 +103,14 @@ impl Gamma {
         assert!(shape > 0.0, "Gamma::new called with shape <= 0");
         assert!(scale > 0.0, "Gamma::new called with scale <= 0");
 
-        let repr = match shape {
-            1.0 => One(Exp::new(1.0 / scale)),
-            0.0...1.0 => Small(GammaSmallShape::new_raw(shape, scale)),
-            _ => Large(GammaLargeShape::new_raw(shape, scale)),
+        let repr = if shape == 1.0 {
+            One(Exp::new(1.0 / scale))
+        } else if 0.0 <= shape && shape < 1.0 {
+            Small(GammaSmallShape::new_raw(shape, scale))
+        } else {
+            Large(GammaLargeShape::new_raw(shape, scale))
         };
-        Gamma { repr: repr }
+        Gamma { repr }
     }
 }
 
@@ -125,9 +127,9 @@ impl GammaLargeShape {
     fn new_raw(shape: f64, scale: f64) -> GammaLargeShape {
         let d = shape - 1. / 3.;
         GammaLargeShape {
-            scale: scale,
+            scale,
             c: 1. / (9. * d).sqrt(),
-            d: d,
+            d,
         }
     }
 }
@@ -252,7 +254,7 @@ impl IndependentSample<f64> for ChiSquared {
 
 /// The Fisher F distribution `F(m, n)`.
 ///
-/// This distribution is equivalent to the ratio of two normalised
+/// This distribution is equivalent to the ratio of two normalized
 /// chi-squared distributions, that is, `F(m,n) = (χ²(m)/m) /
 /// (χ²(n)/n)`.
 pub struct FisherF {

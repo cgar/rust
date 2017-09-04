@@ -10,11 +10,14 @@
 
 #include <stdio.h>
 
+#include <vector>
+
 #include "rustllvm.h"
 
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/IR/AutoUpgrade.h"
+#include "llvm/IR/AssemblyAnnotationWriter.h"
 #include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Host.h"
@@ -147,6 +150,12 @@ extern "C" void LLVMRustAddPass(LLVMPassManagerRef PMR, LLVMPassRef RustPass) {
 #define SUBTARGET_SPARC
 #endif
 
+#ifdef LLVM_COMPONENT_HEXAGON
+#define SUBTARGET_HEXAGON SUBTARGET(Hexagon)
+#else
+#define SUBTARGET_HEXAGON
+#endif
+
 #define GEN_SUBTARGETS                                                         \
   SUBTARGET_X86                                                                \
   SUBTARGET_ARM                                                                \
@@ -155,7 +164,8 @@ extern "C" void LLVMRustAddPass(LLVMPassManagerRef PMR, LLVMPassRef RustPass) {
   SUBTARGET_PPC                                                                \
   SUBTARGET_SYSTEMZ                                                            \
   SUBTARGET_MSP430                                                             \
-  SUBTARGET_SPARC
+  SUBTARGET_SPARC                                                              \
+  SUBTARGET_HEXAGON
 
 #define SUBTARGET(x)                                                           \
   namespace llvm {                                                             \
@@ -168,23 +178,17 @@ GEN_SUBTARGETS
 
 extern "C" bool LLVMRustHasFeature(LLVMTargetMachineRef TM,
                                    const char *Feature) {
+#if LLVM_RUSTLLVM
   TargetMachine *Target = unwrap(TM);
   const MCSubtargetInfo *MCInfo = Target->getMCSubtargetInfo();
   const FeatureBitset &Bits = MCInfo->getFeatureBits();
-  const llvm::SubtargetFeatureKV *FeatureEntry;
+  const ArrayRef<SubtargetFeatureKV> FeatTable = MCInfo->getFeatureTable();
 
-#define SUBTARGET(x)                                                           \
-  if (MCInfo->isCPUStringValid(x##SubTypeKV[0].Key)) {                         \
-    FeatureEntry = x##FeatureKV;                                               \
-  } else
-
-  GEN_SUBTARGETS { return false; }
-#undef SUBTARGET
-
-  while (strcmp(Feature, FeatureEntry->Key) != 0)
-    FeatureEntry++;
-
-  return (Bits & FeatureEntry->Value) == FeatureEntry->Value;
+  for (auto &FeatureEntry : FeatTable)
+    if (!strcmp(FeatureEntry.Key, Feature))
+      return (Bits & FeatureEntry.Value) == FeatureEntry.Value;
+#endif
+  return false;
 }
 
 enum class LLVMRustCodeModel {
@@ -239,6 +243,49 @@ static CodeGenOpt::Level fromRust(LLVMRustCodeGenOptLevel Level) {
   }
 }
 
+enum class LLVMRustRelocMode {
+  Default,
+  Static,
+  PIC,
+  DynamicNoPic,
+  ROPI,
+  RWPI,
+  ROPIRWPI,
+};
+
+#if LLVM_VERSION_LE(3, 8)
+static Reloc::Model fromRust(LLVMRustRelocMode RustReloc) {
+#else
+static Optional<Reloc::Model> fromRust(LLVMRustRelocMode RustReloc) {
+#endif
+  switch (RustReloc) {
+  case LLVMRustRelocMode::Default:
+#if LLVM_VERSION_LE(3, 8)
+    return Reloc::Default;
+#else
+    return None;
+#endif
+  case LLVMRustRelocMode::Static:
+    return Reloc::Static;
+  case LLVMRustRelocMode::PIC:
+    return Reloc::PIC_;
+  case LLVMRustRelocMode::DynamicNoPic:
+    return Reloc::DynamicNoPIC;
+#if LLVM_VERSION_GE(4, 0)
+  case LLVMRustRelocMode::ROPI:
+    return Reloc::ROPI;
+  case LLVMRustRelocMode::RWPI:
+    return Reloc::RWPI;
+  case LLVMRustRelocMode::ROPIRWPI:
+    return Reloc::ROPI_RWPI;
+#else
+  default:
+    break;
+#endif
+  }
+  llvm_unreachable("Bad RelocModel.");
+}
+
 #if LLVM_RUSTLLVM
 /// getLongestEntryLength - Return the length of the longest entry in the table.
 ///
@@ -290,35 +337,14 @@ extern "C" void LLVMRustPrintTargetFeatures(LLVMTargetMachineRef) {
 
 extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
     const char *TripleStr, const char *CPU, const char *Feature,
-    LLVMRustCodeModel RustCM, LLVMRelocMode Reloc,
+    LLVMRustCodeModel RustCM, LLVMRustRelocMode RustReloc,
     LLVMRustCodeGenOptLevel RustOptLevel, bool UseSoftFloat,
     bool PositionIndependentExecutable, bool FunctionSections,
     bool DataSections) {
 
-#if LLVM_VERSION_LE(3, 8)
-  Reloc::Model RM;
-#else
-  Optional<Reloc::Model> RM;
-#endif
   auto CM = fromRust(RustCM);
   auto OptLevel = fromRust(RustOptLevel);
-
-  switch (Reloc) {
-  case LLVMRelocStatic:
-    RM = Reloc::Static;
-    break;
-  case LLVMRelocPIC:
-    RM = Reloc::PIC_;
-    break;
-  case LLVMRelocDynamicNoPic:
-    RM = Reloc::DynamicNoPIC;
-    break;
-  default:
-#if LLVM_VERSION_LE(3, 8)
-    RM = Reloc::Default;
-#endif
-    break;
-  }
+  auto RM = fromRust(RustReloc);
 
   std::string Error;
   Triple Trip(Triple::normalize(TripleStr));
@@ -476,8 +502,129 @@ LLVMRustWriteOutputFile(LLVMTargetMachineRef Target, LLVMPassManagerRef PMR,
   return LLVMRustResult::Success;
 }
 
+
+// Callback to demangle function name
+// Parameters:
+// * name to be demangled
+// * name len
+// * output buffer
+// * output buffer len
+// Returns len of demangled string, or 0 if demangle failed.
+typedef size_t (*DemangleFn)(const char*, size_t, char*, size_t);
+
+
+namespace {
+
+class RustAssemblyAnnotationWriter : public AssemblyAnnotationWriter {
+  DemangleFn Demangle;
+  std::vector<char> Buf;
+
+public:
+  RustAssemblyAnnotationWriter(DemangleFn Demangle) : Demangle(Demangle) {}
+
+  // Return empty string if demangle failed
+  // or if name does not need to be demangled
+  StringRef CallDemangle(StringRef name) {
+    if (!Demangle) {
+      return StringRef();
+    }
+
+    if (Buf.size() < name.size() * 2) {
+      // Semangled name usually shorter than mangled,
+      // but allocate twice as much memory just in case
+      Buf.resize(name.size() * 2);
+    }
+
+    auto R = Demangle(name.data(), name.size(), Buf.data(), Buf.size());
+    if (!R) {
+      // Demangle failed.
+      return StringRef();
+    }
+
+    auto Demangled = StringRef(Buf.data(), R);
+    if (Demangled == name) {
+      // Do not print anything if demangled name is equal to mangled.
+      return StringRef();
+    }
+
+    return Demangled;
+  }
+
+  void emitFunctionAnnot(const Function *F,
+                         formatted_raw_ostream &OS) override {
+    StringRef Demangled = CallDemangle(F->getName());
+    if (Demangled.empty()) {
+        return;
+    }
+
+    OS << "; " << Demangled << "\n";
+  }
+
+  void emitInstructionAnnot(const Instruction *I,
+                            formatted_raw_ostream &OS) override {
+    const char *Name;
+    const Value *Value;
+    if (const CallInst *CI = dyn_cast<CallInst>(I)) {
+      Name = "call";
+      Value = CI->getCalledValue();
+    } else if (const InvokeInst* II = dyn_cast<InvokeInst>(I)) {
+      Name = "invoke";
+      Value = II->getCalledValue();
+    } else {
+      // Could demangle more operations, e. g.
+      // `store %place, @function`.
+      return;
+    }
+
+    if (!Value->hasName()) {
+      return;
+    }
+
+    StringRef Demangled = CallDemangle(Value->getName());
+    if (Demangled.empty()) {
+      return;
+    }
+
+    OS << "; " << Name << " " << Demangled << "\n";
+  }
+};
+
+class RustPrintModulePass : public ModulePass {
+  raw_ostream* OS;
+  DemangleFn Demangle;
+public:
+  static char ID;
+  RustPrintModulePass() : ModulePass(ID), OS(nullptr), Demangle(nullptr) {}
+  RustPrintModulePass(raw_ostream &OS, DemangleFn Demangle)
+      : ModulePass(ID), OS(&OS), Demangle(Demangle) {}
+
+  bool runOnModule(Module &M) override {
+    RustAssemblyAnnotationWriter AW(Demangle);
+
+    M.print(*OS, &AW, false);
+
+    return false;
+  }
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.setPreservesAll();
+  }
+
+  static StringRef name() { return "RustPrintModulePass"; }
+};
+
+} // namespace
+
+namespace llvm {
+  void initializeRustPrintModulePassPass(PassRegistry&);
+}
+
+char RustPrintModulePass::ID = 0;
+INITIALIZE_PASS(RustPrintModulePass, "print-rust-module",
+                "Print rust module to stderr", false, false)
+
 extern "C" void LLVMRustPrintModule(LLVMPassManagerRef PMR, LLVMModuleRef M,
-                                    const char *Path) {
+                                    const char *Path, DemangleFn Demangle) {
   llvm::legacy::PassManager *PM = unwrap<llvm::legacy::PassManager>(PMR);
   std::string ErrorInfo;
 
@@ -488,7 +635,7 @@ extern "C" void LLVMRustPrintModule(LLVMPassManagerRef PMR, LLVMModuleRef M,
 
   formatted_raw_ostream FOS(OS);
 
-  PM->add(createPrintModulePass(FOS));
+  PM->add(new RustPrintModulePass(FOS, Demangle));
 
   PM->run(*unwrap(M));
 }

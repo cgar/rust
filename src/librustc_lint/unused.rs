@@ -8,6 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use rustc::hir::def_id::DefId;
 use rustc::ty;
 use rustc::ty::adjustment;
 use util::nodemap::FxHashMap;
@@ -43,9 +44,14 @@ impl UnusedMut {
 
         let mut mutables = FxHashMap();
         for p in pats {
-            p.each_binding(|mode, id, _, path1| {
+            p.each_binding(|_, id, span, path1| {
+                let hir_id = cx.tcx.hir.node_to_hir_id(id);
+                let bm = match cx.tables.pat_binding_modes().get(hir_id) {
+                    Some(&bm) => bm,
+                    None => span_bug!(span, "missing binding mode"),
+                };
                 let name = path1.node;
-                if let hir::BindByValue(hir::MutMutable) = mode {
+                if let ty::BindByValue(hir::MutMutable) = bm {
                     if !name.as_str().starts_with("_") {
                         match mutables.entry(name) {
                             Vacant(entry) => {
@@ -140,24 +146,50 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedResults {
         }
 
         let t = cx.tables.expr_ty(&expr);
-        let warned = match t.sty {
+        let ty_warned = match t.sty {
             ty::TyTuple(ref tys, _) if tys.is_empty() => return,
             ty::TyNever => return,
-            ty::TyBool => return,
             ty::TyAdt(def, _) => {
-                let attrs = cx.tcx.get_attrs(def.did);
-                check_must_use(cx, &attrs[..], s.span)
-            }
+                if def.variants.is_empty() {
+                    return;
+                } else {
+                    check_must_use(cx, def.did, s.span, "")
+                }
+            },
             _ => false,
         };
-        if !warned {
+
+        let mut fn_warned = false;
+        if cx.tcx.sess.features.borrow().fn_must_use {
+            let maybe_def = match expr.node {
+                hir::ExprCall(ref callee, _) => {
+                    match callee.node {
+                        hir::ExprPath(ref qpath) => {
+                            Some(cx.tables.qpath_def(qpath, callee.hir_id))
+                        },
+                        _ => None
+                    }
+                },
+                hir::ExprMethodCall(..) => {
+                    cx.tables.type_dependent_defs().get(expr.hir_id).cloned()
+                },
+                _ => None
+            };
+            if let Some(def) = maybe_def {
+                let def_id = def.def_id();
+                fn_warned = check_must_use(cx, def_id, s.span, "return value of ");
+            }
+        }
+
+        if !(ty_warned || fn_warned) {
             cx.span_lint(UNUSED_RESULTS, s.span, "unused result");
         }
 
-        fn check_must_use(cx: &LateContext, attrs: &[ast::Attribute], sp: Span) -> bool {
-            for attr in attrs {
+        fn check_must_use(cx: &LateContext, def_id: DefId, sp: Span, describe_path: &str) -> bool {
+            for attr in cx.tcx.get_attrs(def_id).iter() {
                 if attr.check_name("must_use") {
-                    let mut msg = "unused result which must be used".to_string();
+                    let mut msg = format!("unused {}`{}` which must be used",
+                                          describe_path, cx.tcx.item_path_str(def_id));
                     // check for #[must_use="..."]
                     if let Some(s) = attr.value_str() {
                         msg.push_str(": ");
@@ -168,33 +200,6 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedResults {
                 }
             }
             false
-        }
-    }
-}
-
-declare_lint! {
-    pub UNUSED_UNSAFE,
-    Warn,
-    "unnecessary use of an `unsafe` block"
-}
-
-#[derive(Copy, Clone)]
-pub struct UnusedUnsafe;
-
-impl LintPass for UnusedUnsafe {
-    fn get_lints(&self) -> LintArray {
-        lint_array!(UNUSED_UNSAFE)
-    }
-}
-
-impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedUnsafe {
-    fn check_expr(&mut self, cx: &LateContext, e: &hir::Expr) {
-        if let hir::ExprBlock(ref blk) = e.node {
-            // Don't warn about generated blocks, that'll just pollute the output.
-            if blk.rules == hir::UnsafeBlock(hir::UserProvided) &&
-               !cx.tcx.used_unsafe.borrow().contains(&blk.id) {
-                cx.span_lint(UNUSED_UNSAFE, blk.span, "unnecessary `unsafe` block");
-            }
         }
     }
 }
@@ -242,6 +247,7 @@ impl LintPass for UnusedAttributes {
 impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedAttributes {
     fn check_attribute(&mut self, cx: &LateContext, attr: &ast::Attribute) {
         debug!("checking attribute: {:?}", attr);
+        let name = unwrap_or!(attr.name(), return);
 
         // Note that check_name() marks the attribute as used if it matches.
         for &(ref name, ty, _) in BUILTIN_ATTRIBUTES {
@@ -267,13 +273,13 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedAttributes {
             cx.span_lint(UNUSED_ATTRIBUTES, attr.span, "unused attribute");
             // Is it a builtin attribute that must be used at the crate level?
             let known_crate = BUILTIN_ATTRIBUTES.iter()
-                .find(|&&(name, ty, _)| attr.name() == name && ty == AttributeType::CrateLevel)
+                .find(|&&(builtin, ty, _)| name == builtin && ty == AttributeType::CrateLevel)
                 .is_some();
 
             // Has a plugin registered this attribute as one which must be used at
             // the crate level?
             let plugin_crate = plugin_attributes.iter()
-                .find(|&&(ref x, t)| attr.name() == &**x && AttributeType::CrateLevel == t)
+                .find(|&&(ref x, t)| name == &**x && AttributeType::CrateLevel == t)
                 .is_some();
             if known_crate || plugin_crate {
                 let msg = match attr.style {
@@ -440,21 +446,13 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedAllocation {
             _ => return,
         }
 
-        if let Some(adjustment) = cx.tables.adjustments.get(&e.id) {
-            if let adjustment::Adjust::DerefRef { autoref, .. } = adjustment.kind {
-                match autoref {
-                    Some(adjustment::AutoBorrow::Ref(_, hir::MutImmutable)) => {
-                        cx.span_lint(UNUSED_ALLOCATION,
-                                     e.span,
-                                     "unnecessary allocation, use & instead");
-                    }
-                    Some(adjustment::AutoBorrow::Ref(_, hir::MutMutable)) => {
-                        cx.span_lint(UNUSED_ALLOCATION,
-                                     e.span,
-                                     "unnecessary allocation, use &mut instead");
-                    }
-                    _ => (),
-                }
+        for adj in cx.tables.expr_adjustments(e) {
+            if let adjustment::Adjust::Borrow(adjustment::AutoBorrow::Ref(_, m)) = adj.kind {
+                let msg = match m {
+                    hir::MutImmutable => "unnecessary allocation, use & instead",
+                    hir::MutMutable => "unnecessary allocation, use &mut instead"
+                };
+                cx.span_lint(UNUSED_ALLOCATION, e.span, msg);
             }
         }
     }

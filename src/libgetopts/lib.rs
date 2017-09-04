@@ -77,12 +77,6 @@
 //! }
 //! ```
 
-#![crate_name = "getopts"]
-#![unstable(feature = "rustc_private",
-            reason = "use the crates.io `getopts` library instead",
-            issue = "27812")]
-#![crate_type = "rlib"]
-#![crate_type = "dylib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/",
@@ -91,7 +85,6 @@
 
 #![deny(missing_docs)]
 #![deny(warnings)]
-#![feature(staged_api)]
 
 use self::Name::*;
 use self::HasArg::*;
@@ -254,28 +247,28 @@ impl OptGroup {
             (0, _) => {
                 Opt {
                     name: Long((long_name)),
-                    hasarg: hasarg,
-                    occur: occur,
+                    hasarg,
+                    occur,
                     aliases: Vec::new(),
                 }
             }
             (1, 0) => {
                 Opt {
                     name: Short(short_name.chars().next().unwrap()),
-                    hasarg: hasarg,
-                    occur: occur,
+                    hasarg,
+                    occur,
                     aliases: Vec::new(),
                 }
             }
             (1, _) => {
                 Opt {
                     name: Long((long_name)),
-                    hasarg: hasarg,
-                    occur: occur,
+                    hasarg,
+                    occur,
                     aliases: vec![Opt {
                                       name: Short(short_name.chars().next().unwrap()),
-                                      hasarg: hasarg,
-                                      occur: occur,
+                                      hasarg,
+                                      occur,
                                       aliases: Vec::new(),
                                   }],
                 }
@@ -534,8 +527,8 @@ pub fn opt(short_name: &str,
         long_name: long_name.to_owned(),
         hint: hint.to_owned(),
         desc: desc.to_owned(),
-        hasarg: hasarg,
-        occur: occur,
+        hasarg,
+        occur,
     }
 }
 
@@ -685,9 +678,9 @@ pub fn getopts(args: &[String], optgrps: &[OptGroup]) -> Result {
         }
     }
     Ok(Matches {
-        opts: opts,
-        vals: vals,
-        free: free,
+        opts,
+        vals,
+        free,
     })
 }
 

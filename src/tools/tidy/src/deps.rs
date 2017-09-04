@@ -16,17 +16,29 @@ use std::path::Path;
 
 static LICENSES: &'static [&'static str] = &[
     "MIT/Apache-2.0",
+    "MIT / Apache-2.0",
     "Apache-2.0/MIT",
+    "Apache-2.0 / MIT",
     "MIT OR Apache-2.0",
     "MIT",
     "Unlicense/MIT",
 ];
 
-/// These MPL licensed projects are acceptable, but only these.
+// These are exceptions to Rust's permissive licensing policy, and
+// should be considered bugs. Exceptions are only allowed in Rust
+// tooling. It is _crucial_ that no exception crates be dependencies
+// of the Rust runtime (std / test).
 static EXCEPTIONS: &'static [&'static str] = &[
-    "mdbook",
-    "pest",
-    "thread-id",
+    "mdbook", // MPL2, mdbook
+    "openssl", // BSD+advertising clause, cargo, mdbook
+    "pest", // MPL2, mdbook via handlebars
+    "thread-id", // Apache-2.0, mdbook
+    "cssparser", // MPL-2.0, rustdoc
+    "smallvec", // MPL-2.0, rustdoc
+    "magenta-sys", // BSD-3-Clause, rustdoc
+    "magenta", // BSD-3-Clause, rustdoc
+    "cssparser-macros", // MPL-2.0, rustdoc
+    "selectors", // MPL-2.0, rustdoc
 ];
 
 pub fn check(path: &Path, bad: &mut bool) {

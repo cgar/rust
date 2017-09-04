@@ -11,26 +11,25 @@
 use llvm::{self, ValueRef};
 use rustc::ty::{self, Ty};
 use rustc::ty::cast::{CastTy, IntTy};
-use rustc::ty::layout::Layout;
+use rustc::ty::layout::{Layout, LayoutTyper};
 use rustc::mir::tcx::LvalueTy;
 use rustc::mir;
-use middle::lang_items::ExchangeMallocFnLangItem;
+use rustc::middle::lang_items::ExchangeMallocFnLangItem;
 
-use asm;
 use base;
 use builder::Builder;
-use callee::Callee;
+use callee;
 use common::{self, val_ty, C_bool, C_null, C_uint};
-use common::{C_integral};
+use common::{C_integral, C_i32};
 use adt;
 use machine;
+use monomorphize;
 use type_::Type;
 use type_of;
 use tvec;
 use value::Value;
-use Disr;
 
-use super::MirContext;
+use super::{MirContext, LocalRef};
 use super::constant::const_scalar_checked_binop;
 use super::operand::{OperandRef, OperandValue};
 use super::lvalue::LvalueRef;
@@ -94,21 +93,53 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
             }
 
             mir::Rvalue::Repeat(ref elem, ref count) => {
+                let dest_ty = dest.ty.to_ty(bcx.tcx());
+
+                // No need to inizialize memory of a zero-sized slice
+                if common::type_is_zero_size(bcx.ccx, dest_ty) {
+                    return bcx;
+                }
+
                 let tr_elem = self.trans_operand(&bcx, elem);
-                let size = count.value.as_u64(bcx.tcx().sess.target.uint_type);
+                let size = count.as_u64(bcx.tcx().sess.target.uint_type);
                 let size = C_uint(bcx.ccx, size);
                 let base = base::get_dataptr(&bcx, dest.llval);
-                tvec::slice_for_each(&bcx, base, tr_elem.ty, size, |bcx, llslot| {
-                    self.store_operand(bcx, llslot, dest.alignment.to_align(), tr_elem);
+                let align = dest.alignment.to_align();
+
+                if let OperandValue::Immediate(v) = tr_elem.val {
+                    // Use llvm.memset.p0i8.* to initialize all zero arrays
+                    if common::is_const_integral(v) && common::const_to_uint(v) == 0 {
+                        let align = align.unwrap_or_else(|| bcx.ccx.align_of(tr_elem.ty));
+                        let align = C_i32(bcx.ccx, align as i32);
+                        let ty = type_of::type_of(bcx.ccx, dest_ty);
+                        let size = machine::llsize_of(bcx.ccx, ty);
+                        let fill = C_integral(Type::i8(bcx.ccx), 0, false);
+                        base::call_memset(&bcx, base, fill, size, align, false);
+                        return bcx;
+                    }
+
+                    // Use llvm.memset.p0i8.* to initialize byte arrays
+                    if common::val_ty(v) == Type::i8(bcx.ccx) {
+                        let align = align.unwrap_or_else(|| bcx.ccx.align_of(tr_elem.ty));
+                        let align = C_i32(bcx.ccx, align as i32);
+                        base::call_memset(&bcx, base, v, size, align, false);
+                        return bcx;
+                    }
+                }
+
+                tvec::slice_for_each(&bcx, base, tr_elem.ty, size, |bcx, llslot, loop_bb| {
+                    self.store_operand(bcx, llslot, align, tr_elem);
+                    bcx.br(loop_bb);
                 })
             }
 
             mir::Rvalue::Aggregate(ref kind, ref operands) => {
-                match *kind {
+                match **kind {
                     mir::AggregateKind::Adt(adt_def, variant_index, substs, active_field_index) => {
-                        let disr = Disr::from(adt_def.variants[variant_index].disr_val);
+                        let discr = adt_def.discriminant_for_variant(bcx.tcx(), variant_index)
+                           .to_u128_unchecked() as u64;
                         let dest_ty = dest.ty.to_ty(bcx.tcx());
-                        adt::trans_set_discr(&bcx, dest_ty, dest.llval, Disr::from(disr));
+                        adt::trans_set_discr(&bcx, dest_ty, dest.llval, discr);
                         for (i, operand) in operands.iter().enumerate() {
                             let op = self.trans_operand(&bcx, operand);
                             // Do not generate stores and GEPis for zero-sized fields.
@@ -117,9 +148,9 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
                                     dest.llval, dest.ty, dest.alignment);
                                 let field_index = active_field_index.unwrap_or(i);
                                 val.ty = LvalueTy::Downcast {
-                                    adt_def: adt_def,
+                                    adt_def,
                                     substs: self.monomorphize(&substs),
-                                    variant_index: disr.0 as usize,
+                                    variant_index,
                                 };
                                 let (lldest_i, align) = val.trans_field_ptr(&bcx, field_index);
                                 self.store_operand(&bcx, lldest_i, align.to_align(), op);
@@ -129,10 +160,12 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
                     _ => {
                         // If this is a tuple or closure, we need to translate GEP indices.
                         let layout = bcx.ccx.layout_of(dest.ty.to_ty(bcx.tcx()));
-                        let translation = if let Layout::Univariant { ref variant, .. } = *layout {
-                            Some(&variant.memory_index)
-                        } else {
-                            None
+                        let get_memory_index = |i| {
+                            if let Layout::Univariant { ref variant, .. } = *layout {
+                                adt::struct_llfields_index(variant, i)
+                            } else {
+                                i
+                            }
                         };
                         let alignment = dest.alignment;
                         for (i, operand) in operands.iter().enumerate() {
@@ -142,11 +175,7 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
                                 // Note: perhaps this should be StructGep, but
                                 // note that in some cases the values here will
                                 // not be structs but arrays.
-                                let i = if let Some(ref t) = translation {
-                                    t[i] as usize
-                                } else {
-                                    i
-                                };
+                                let i = get_memory_index(i);
                                 let dest = bcx.gepi(dest.llval, &[0, i]);
                                 self.store_operand(&bcx, dest, alignment.to_align(), op);
                             }
@@ -156,22 +185,8 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
                 bcx
             }
 
-            mir::Rvalue::InlineAsm { ref asm, ref outputs, ref inputs } => {
-                let outputs = outputs.iter().map(|output| {
-                    let lvalue = self.trans_lvalue(&bcx, output);
-                    (lvalue.llval, lvalue.ty.to_ty(bcx.tcx()))
-                }).collect();
-
-                let input_vals = inputs.iter().map(|input| {
-                    self.trans_operand(&bcx, input).immediate()
-                }).collect();
-
-                asm::trans_inline_asm(&bcx, asm, outputs, input_vals);
-                bcx
-            }
-
             _ => {
-                assert!(rvalue_creates_operand(rvalue));
+                assert!(self.rvalue_creates_operand(rvalue));
                 let (bcx, temp) = self.trans_rvalue_operand(bcx, rvalue);
                 self.store_operand(&bcx, dest.llval, dest.alignment.to_align(), temp);
                 bcx
@@ -184,7 +199,7 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
                                 rvalue: &mir::Rvalue<'tcx>)
                                 -> (Builder<'a, 'tcx>, OperandRef<'tcx>)
     {
-        assert!(rvalue_creates_operand(rvalue), "cannot trans {:?} to operand", rvalue);
+        assert!(self.rvalue_creates_operand(rvalue), "cannot trans {:?} to operand", rvalue);
 
         match *rvalue {
             mir::Rvalue::Cast(ref kind, ref source, cast_ty) => {
@@ -195,13 +210,24 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
                 let val = match *kind {
                     mir::CastKind::ReifyFnPointer => {
                         match operand.ty.sty {
-                            ty::TyFnDef(def_id, substs, _) => {
+                            ty::TyFnDef(def_id, substs) => {
                                 OperandValue::Immediate(
-                                    Callee::def(bcx.ccx, def_id, substs)
-                                        .reify(bcx.ccx))
+                                    callee::resolve_and_get_fn(bcx.ccx, def_id, substs))
                             }
                             _ => {
                                 bug!("{} cannot be reified to a fn ptr", operand.ty)
+                            }
+                        }
+                    }
+                    mir::CastKind::ClosureFnPointer => {
+                        match operand.ty.sty {
+                            ty::TyClosure(def_id, substs) => {
+                                let instance = monomorphize::resolve_closure(
+                                    bcx.ccx.shared(), def_id, substs, ty::ClosureKind::FnOnce);
+                                OperandValue::Immediate(callee::get_fn(bcx.ccx, instance))
+                            }
+                            _ => {
+                                bug!("{} cannot be cast to a fn ptr", operand.ty)
                             }
                         }
                     }
@@ -322,7 +348,7 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
                     }
                 };
                 let operand = OperandRef {
-                    val: val,
+                    val,
                     ty: cast_ty
                 };
                 (bcx, operand)
@@ -333,7 +359,7 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
 
                 let ty = tr_lvalue.ty.to_ty(bcx.tcx());
                 let ref_ty = bcx.tcx().mk_ref(
-                    bcx.tcx().mk_region(ty::ReErased),
+                    bcx.tcx().types.re_erased,
                     ty::TypeAndMut { ty: ty, mutbl: bk.to_mutbl_lossy() }
                 );
 
@@ -355,9 +381,9 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
             }
 
             mir::Rvalue::Len(ref lvalue) => {
-                let tr_lvalue = self.trans_lvalue(&bcx, lvalue);
+                let size = self.evaluate_array_len(&bcx, lvalue);
                 let operand = OperandRef {
-                    val: OperandValue::Immediate(tr_lvalue.len(bcx.ccx)),
+                    val: OperandValue::Immediate(size),
                     ty: bcx.tcx().types.usize,
                 };
                 (bcx, operand)
@@ -426,7 +452,7 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
             mir::Rvalue::Discriminant(ref lvalue) => {
                 let discr_lvalue = self.trans_lvalue(&bcx, lvalue);
                 let enum_ty = discr_lvalue.ty.to_ty(bcx.tcx());
-                let discr_ty = rvalue.ty(&*self.mir, bcx.tcx()).unwrap();
+                let discr_ty = rvalue.ty(&*self.mir, bcx.tcx());
                 let discr_type = type_of::immediate_type_of(bcx.ccx, discr_ty);
                 let discr = adt::trans_get_discr(&bcx, enum_ty, discr_lvalue.llval,
                                                   discr_lvalue.alignment, Some(discr_type), true);
@@ -436,11 +462,21 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
                 })
             }
 
-            mir::Rvalue::Box(content_ty) => {
+            mir::Rvalue::NullaryOp(mir::NullOp::SizeOf, ty) => {
+                assert!(bcx.ccx.shared().type_is_sized(ty));
+                let val = C_uint(bcx.ccx, bcx.ccx.size_of(ty));
+                let tcx = bcx.tcx();
+                (bcx, OperandRef {
+                    val: OperandValue::Immediate(val),
+                    ty: tcx.types.usize,
+                })
+            }
+
+            mir::Rvalue::NullaryOp(mir::NullOp::Box, content_ty) => {
                 let content_ty: Ty<'tcx> = self.monomorphize(&content_ty);
                 let llty = type_of::type_of(bcx.ccx, content_ty);
                 let llsize = machine::llsize_of(bcx.ccx, llty);
-                let align = type_of::align_of(bcx.ccx, content_ty);
+                let align = bcx.ccx.align_of(content_ty);
                 let llalign = C_uint(bcx.ccx, align);
                 let llty_ptr = llty.ptr_to();
                 let box_ty = bcx.tcx().mk_box(content_ty);
@@ -452,8 +488,8 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
                         bcx.sess().fatal(&format!("allocation of `{}` {}", box_ty, s));
                     }
                 };
-                let r = Callee::def(bcx.ccx, def_id, bcx.tcx().intern_substs(&[]))
-                    .reify(bcx.ccx);
+                let instance = ty::Instance::mono(bcx.tcx(), def_id);
+                let r = callee::get_fn(bcx.ccx, instance);
                 let val = bcx.pointercast(bcx.call(r, &[llsize, llalign], None), llty_ptr);
 
                 let operand = OperandRef {
@@ -462,18 +498,38 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
                 };
                 (bcx, operand)
             }
-
             mir::Rvalue::Use(ref operand) => {
                 let operand = self.trans_operand(&bcx, operand);
                 (bcx, operand)
             }
             mir::Rvalue::Repeat(..) |
-            mir::Rvalue::Aggregate(..) |
-            mir::Rvalue::InlineAsm { .. } => {
-                bug!("cannot generate operand from rvalue {:?}", rvalue);
-
+            mir::Rvalue::Aggregate(..) => {
+                // According to `rvalue_creates_operand`, only ZST
+                // aggregate rvalues are allowed to be operands.
+                let ty = rvalue.ty(self.mir, self.ccx.tcx());
+                (bcx, OperandRef::new_zst(self.ccx, self.monomorphize(&ty)))
             }
         }
+    }
+
+    fn evaluate_array_len(&mut self,
+                          bcx: &Builder<'a, 'tcx>,
+                          lvalue: &mir::Lvalue<'tcx>) -> ValueRef
+    {
+        // ZST are passed as operands and require special handling
+        // because trans_lvalue() panics if Local is operand.
+        if let mir::Lvalue::Local(index) = *lvalue {
+            if let LocalRef::Operand(Some(op)) = self.locals[index] {
+                if common::type_is_zero_size(bcx.ccx, op.ty) {
+                    if let ty::TyArray(_, n) = op.ty.sty {
+                        return common::C_uint(bcx.ccx, n);
+                    }
+                }
+            }
+        }
+        // use common size calculation for non zero-sized types
+        let tr_value = self.trans_lvalue(&bcx, lvalue);
+        return tr_value.len(bcx.ccx);
     }
 
     pub fn trans_scalar_binop(&mut self,
@@ -519,6 +575,7 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
             mir::BinOp::BitOr => bcx.or(lhs, rhs),
             mir::BinOp::BitAnd => bcx.and(lhs, rhs),
             mir::BinOp::BitXor => bcx.xor(lhs, rhs),
+            mir::BinOp::Offset => bcx.inbounds_gep(lhs, &[rhs]),
             mir::BinOp::Shl => common::build_unchecked_lshift(bcx, lhs, rhs),
             mir::BinOp::Shr => common::build_unchecked_rshift(bcx, input_ty, lhs, rhs),
             mir::BinOp::Ne | mir::BinOp::Lt | mir::BinOp::Gt |
@@ -654,27 +711,29 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
 
         OperandValue::Pair(val, of)
     }
-}
 
-pub fn rvalue_creates_operand(rvalue: &mir::Rvalue) -> bool {
-    match *rvalue {
-        mir::Rvalue::Ref(..) |
-        mir::Rvalue::Len(..) |
-        mir::Rvalue::Cast(..) | // (*)
-        mir::Rvalue::BinaryOp(..) |
-        mir::Rvalue::CheckedBinaryOp(..) |
-        mir::Rvalue::UnaryOp(..) |
-        mir::Rvalue::Discriminant(..) |
-        mir::Rvalue::Box(..) |
-        mir::Rvalue::Use(..) =>
-            true,
-        mir::Rvalue::Repeat(..) |
-        mir::Rvalue::Aggregate(..) |
-        mir::Rvalue::InlineAsm { .. } =>
-            false,
+    pub fn rvalue_creates_operand(&self, rvalue: &mir::Rvalue<'tcx>) -> bool {
+        match *rvalue {
+            mir::Rvalue::Ref(..) |
+            mir::Rvalue::Len(..) |
+            mir::Rvalue::Cast(..) | // (*)
+            mir::Rvalue::BinaryOp(..) |
+            mir::Rvalue::CheckedBinaryOp(..) |
+            mir::Rvalue::UnaryOp(..) |
+            mir::Rvalue::Discriminant(..) |
+            mir::Rvalue::NullaryOp(..) |
+            mir::Rvalue::Use(..) => // (*)
+                true,
+            mir::Rvalue::Repeat(..) |
+            mir::Rvalue::Aggregate(..) => {
+                let ty = rvalue.ty(self.mir, self.ccx.tcx());
+                let ty = self.monomorphize(&ty);
+                common::type_is_zero_size(self.ccx, ty)
+            }
+        }
+
+        // (*) this is only true if the type is suitable
     }
-
-    // (*) this is only true if the type is suitable
 }
 
 #[derive(Copy, Clone)]

@@ -24,9 +24,14 @@ pub fn attr_with_args(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let input = input.to_string();
 
-    assert_eq!(input, "fn foo (  ) {  }");
+    assert_eq!(input, "fn foo() { }");
 
     r#"
         fn foo() -> &'static str { "Hello, world!" }
     "#.parse().unwrap()
+}
+
+#[proc_macro_attribute]
+pub fn identity(attr_args: TokenStream, _: TokenStream) -> TokenStream {
+    attr_args
 }

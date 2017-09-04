@@ -10,19 +10,15 @@
 
 #![deny(warnings)]
 
-#[macro_use]
 extern crate build_helper;
 extern crate gcc;
 
 use std::env;
-use std::fs::{self, File};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
-use build_helper::{run, rerun_if_changed_anything_in_dir, up_to_date};
+use build_helper::{run, native_lib_boilerplate};
 
 fn main() {
-    println!("cargo:rerun-if-changed=build.rs");
-
     // FIXME: This is a hack to support building targets that don't
     // support jemalloc alongside hosts that do. The jemalloc build is
     // controlled by a feature of the std crate, and if that feature
@@ -61,22 +57,11 @@ fn main() {
         return;
     }
 
-    let build_dir = env::var_os("RUSTBUILD_NATIVE_DIR").unwrap_or(env::var_os("OUT_DIR").unwrap());
-    let build_dir = PathBuf::from(build_dir).join("jemalloc");
-    let _ = fs::create_dir_all(&build_dir);
-
-    if target.contains("windows") {
-        println!("cargo:rustc-link-lib=static=jemalloc");
-    } else {
-        println!("cargo:rustc-link-lib=static=jemalloc_pic");
-    }
-    println!("cargo:rustc-link-search=native={}/lib", build_dir.display());
-    let src_dir = env::current_dir().unwrap().join("../jemalloc");
-    rerun_if_changed_anything_in_dir(&src_dir);
-    let timestamp = build_dir.join("rustbuild.timestamp");
-    if up_to_date(&Path::new("build.rs"), &timestamp) && up_to_date(&src_dir, &timestamp) {
-        return
-    }
+    let link_name = if target.contains("windows") { "jemalloc" } else { "jemalloc_pic" };
+    let native = match native_lib_boilerplate("jemalloc", "jemalloc", link_name, "lib") {
+        Ok(native) => native,
+        _ => return,
+    };
 
     let compiler = gcc::Config::new().get_compiler();
     // only msvc returns None for ar so unwrap is okay
@@ -88,12 +73,12 @@ fn main() {
         .join(" ");
 
     let mut cmd = Command::new("sh");
-    cmd.arg(src_dir.join("configure")
-                   .to_str()
-                   .unwrap()
-                   .replace("C:\\", "/c/")
-                   .replace("\\", "/"))
-       .current_dir(&build_dir)
+    cmd.arg(native.src_dir.join("configure")
+                          .to_str()
+                          .unwrap()
+                          .replace("C:\\", "/c/")
+                          .replace("\\", "/"))
+       .current_dir(&native.out_dir)
        .env("CC", compiler.path())
        .env("EXTRA_CFLAGS", cflags.clone())
        // jemalloc generates Makefile deps using GCC's "-MM" flag. This means
@@ -108,29 +93,7 @@ fn main() {
        .env("AR", &ar)
        .env("RANLIB", format!("{} s", ar.display()));
 
-    if target.contains("windows") {
-        // A bit of history here, this used to be --enable-lazy-lock added in
-        // #14006 which was filed with jemalloc in jemalloc/jemalloc#83 which
-        // was also reported to MinGW:
-        //
-        //  http://sourceforge.net/p/mingw-w64/bugs/395/
-        //
-        // When updating jemalloc to 4.0, however, it was found that binaries
-        // would exit with the status code STATUS_RESOURCE_NOT_OWNED indicating
-        // that a thread was unlocking a mutex it never locked. Disabling this
-        // "lazy lock" option seems to fix the issue, but it was enabled by
-        // default for MinGW targets in 13473c7 for jemalloc.
-        //
-        // As a result of all that, force disabling lazy lock on Windows, and
-        // after reading some code it at least *appears* that the initialization
-        // of mutexes is otherwise ok in jemalloc, so shouldn't cause problems
-        // hopefully...
-        //
-        // tl;dr: make windows behave like other platforms by disabling lazy
-        //        locking, but requires passing an option due to a historical
-        //        default with jemalloc.
-        cmd.arg("--disable-lazy-lock");
-    } else if target.contains("ios") {
+    if target.contains("ios") {
         cmd.arg("--disable-tls");
     } else if target.contains("android") {
         // We force android to have prefixed symbols because apparently
@@ -144,16 +107,16 @@ fn main() {
         // should be good to go!
         cmd.arg("--with-jemalloc-prefix=je_");
         cmd.arg("--disable-tls");
-    } else if target.contains("dragonfly") {
+    } else if target.contains("dragonfly") || target.contains("musl") {
         cmd.arg("--with-jemalloc-prefix=je_");
     }
 
-    if cfg!(feature = "debug-jemalloc") {
-        cmd.arg("--enable-debug");
-    }
+    // FIXME: building with jemalloc assertions is currently broken.
+    // See <https://github.com/rust-lang/rust/issues/44152>.
+    //if cfg!(feature = "debug") {
+    //    cmd.arg("--enable-debug");
+    //}
 
-    // Turn off broken quarantine (see jemalloc/jemalloc#161)
-    cmd.arg("--disable-fill");
     cmd.arg(format!("--host={}", build_helper::gnu_target(&target)));
     cmd.arg(format!("--build={}", build_helper::gnu_target(&host)));
 
@@ -166,8 +129,13 @@ fn main() {
     run(&mut cmd);
 
     let mut make = Command::new(build_helper::make(&host));
-    make.current_dir(&build_dir)
+    make.current_dir(&native.out_dir)
         .arg("build_lib_static");
+
+    // These are intended for mingw32-make which we don't use
+    if cfg!(windows) {
+        make.env_remove("MAKEFLAGS").env_remove("MFLAGS");
+    }
 
     // mingw make seems... buggy? unclear...
     if !host.contains("windows") {
@@ -187,6 +155,4 @@ fn main() {
             .file("pthread_atfork_dummy.c")
             .compile("libpthread_atfork_dummy.a");
     }
-
-    t!(File::create(&timestamp));
 }

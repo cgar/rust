@@ -39,7 +39,7 @@ use syntax::codemap::Spanned;
 use syntax_pos::Span;
 use hir::*;
 use hir::def::Def;
-use hir::map::Map;
+use hir::map::{self, Map};
 use super::itemlikevisit::DeepVisitor;
 
 use std::cmp;
@@ -87,8 +87,8 @@ pub enum NestedVisitorMap<'this, 'tcx: 'this> {
     /// Do not visit nested item-like things, but visit nested things
     /// that are inside of an item-like.
     ///
-    /// **This is the most common choice.** A very commmon pattern is
-    /// to use `tcx.visit_all_item_likes_in_krate()` as an outer loop,
+    /// **This is the most common choice.** A very common pattern is
+    /// to use `visit_all_item_likes()` as an outer loop,
     /// and to have the visitor that visits the contents of each item
     /// using this setting.
     OnlyBodies(&'this Map<'tcx>),
@@ -474,6 +474,9 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item) {
             visitor.visit_id(item.id);
             walk_list!(visitor, visit_foreign_item, &foreign_module.items);
         }
+        ItemGlobalAsm(_) => {
+            visitor.visit_id(item.id);
+        }
         ItemTy(ref typ, ref type_parameters) => {
             visitor.visit_id(item.id);
             visitor.visit_ty(typ);
@@ -578,7 +581,7 @@ pub fn walk_ty<'v, V: Visitor<'v>>(visitor: &mut V, typ: &'v Ty) {
         TyTypeof(expression) => {
             visitor.visit_nested_body(expression)
         }
-        TyInfer => {}
+        TyInfer | TyErr => {}
     }
 }
 
@@ -614,17 +617,9 @@ pub fn walk_path_segment<'v, V: Visitor<'v>>(visitor: &mut V,
 pub fn walk_path_parameters<'v, V: Visitor<'v>>(visitor: &mut V,
                                                 _path_span: Span,
                                                 path_parameters: &'v PathParameters) {
-    match *path_parameters {
-        AngleBracketedParameters(ref data) => {
-            walk_list!(visitor, visit_ty, &data.types);
-            walk_list!(visitor, visit_lifetime, &data.lifetimes);
-            walk_list!(visitor, visit_assoc_type_binding, &data.bindings);
-        }
-        ParenthesizedParameters(ref data) => {
-            walk_list!(visitor, visit_ty, &data.inputs);
-            walk_list!(visitor, visit_ty, &data.output);
-        }
-    }
+    walk_list!(visitor, visit_lifetime, &path_parameters.lifetimes);
+    walk_list!(visitor, visit_ty, &path_parameters.types);
+    walk_list!(visitor, visit_assoc_type_binding, &path_parameters.bindings);
 }
 
 pub fn walk_assoc_type_binding<'v, V: Visitor<'v>>(visitor: &mut V,
@@ -832,7 +827,16 @@ pub fn walk_trait_item_ref<'v, V: Visitor<'v>>(visitor: &mut V, trait_item_ref: 
 
 pub fn walk_impl_item<'v, V: Visitor<'v>>(visitor: &mut V, impl_item: &'v ImplItem) {
     // NB: Deliberately force a compilation error if/when new fields are added.
-    let ImplItem { id: _, name, ref vis, ref defaultness, ref attrs, ref node, span } = *impl_item;
+    let ImplItem {
+        id: _,
+        hir_id: _,
+        name,
+        ref vis,
+        ref defaultness,
+        ref attrs,
+        ref node,
+        span
+    } = *impl_item;
 
     visitor.visit_name(span, name);
     visitor.visit_vis(vis);
@@ -941,10 +945,9 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr) {
             walk_list!(visitor, visit_expr, arguments);
             visitor.visit_expr(callee_expression)
         }
-        ExprMethodCall(ref name, ref types, ref arguments) => {
-            visitor.visit_name(name.span, name.node);
+        ExprMethodCall(ref segment, _, ref arguments) => {
+            visitor.visit_path_segment(expression.span, segment);
             walk_list!(visitor, visit_expr, arguments);
-            walk_list!(visitor, visit_ty, types);
         }
         ExprBinary(_, ref left_expression, ref right_expression) => {
             visitor.visit_expr(left_expression);
@@ -960,7 +963,7 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr) {
         }
         ExprIf(ref head_expression, ref if_block, ref optional_else) => {
             visitor.visit_expr(head_expression);
-            visitor.visit_block(if_block);
+            visitor.visit_expr(if_block);
             walk_list!(visitor, visit_expr, optional_else);
         }
         ExprWhile(ref subexpression, ref block, ref opt_sp_name) => {
@@ -976,7 +979,7 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr) {
             visitor.visit_expr(subexpression);
             walk_list!(visitor, visit_arm, arms);
         }
-        ExprClosure(_, ref function_declaration, body, _fn_decl_span) => {
+        ExprClosure(_, ref function_declaration, body, _fn_decl_span, _gen) => {
             visitor.visit_fn(FnKind::Closure(&expression.attrs),
                              function_declaration,
                              body,
@@ -1006,18 +1009,28 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr) {
         ExprPath(ref qpath) => {
             visitor.visit_qpath(qpath, expression.id, expression.span);
         }
-        ExprBreak(None, ref opt_expr) => {
+        ExprBreak(label, ref opt_expr) => {
+            label.ident.map(|ident| {
+                match label.target_id {
+                    ScopeTarget::Block(node_id) |
+                    ScopeTarget::Loop(LoopIdResult::Ok(node_id)) =>
+                        visitor.visit_def_mention(Def::Label(node_id)),
+                    ScopeTarget::Loop(LoopIdResult::Err(_)) => {},
+                };
+                visitor.visit_name(ident.span, ident.node.name);
+            });
             walk_list!(visitor, visit_expr, opt_expr);
         }
-        ExprBreak(Some(label), ref opt_expr) => {
-            visitor.visit_def_mention(Def::Label(label.loop_id));
-            visitor.visit_name(label.span, label.name);
-            walk_list!(visitor, visit_expr, opt_expr);
-        }
-        ExprAgain(None) => {}
-        ExprAgain(Some(label)) => {
-            visitor.visit_def_mention(Def::Label(label.loop_id));
-            visitor.visit_name(label.span, label.name);
+        ExprAgain(label) => {
+            label.ident.map(|ident| {
+                match label.target_id {
+                    ScopeTarget::Block(_) => bug!("can't `continue` to a non-loop block"),
+                    ScopeTarget::Loop(LoopIdResult::Ok(node_id)) =>
+                        visitor.visit_def_mention(Def::Label(node_id)),
+                    ScopeTarget::Loop(LoopIdResult::Err(_)) => {},
+                };
+                visitor.visit_name(ident.span, ident.node.name);
+            });
         }
         ExprRet(ref optional_expression) => {
             walk_list!(visitor, visit_expr, optional_expression);
@@ -1029,6 +1042,9 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr) {
             for input in inputs {
                 visitor.visit_expr(input)
             }
+        }
+        ExprYield(ref subexpression) => {
+            visitor.visit_expr(subexpression);
         }
     }
 }

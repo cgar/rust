@@ -12,9 +12,9 @@
 
 use std::rc::Rc;
 use syntax::ast;
-use syntax::codemap;
 use syntax::ext::base::{Annotatable, ExtCtxt, SyntaxExtension, Resolver};
 use syntax::ext::build::AstBuilder;
+use syntax::ext::hygiene::{Mark, SyntaxContext};
 use syntax::ptr::P;
 use syntax::symbol::Symbol;
 use syntax_pos::Span;
@@ -22,12 +22,6 @@ use syntax_pos::Span;
 macro_rules! pathvec {
     ($($x:ident)::+) => (
         vec![ $( stringify!($x) ),+ ]
-    )
-}
-
-macro_rules! path {
-    ($($x:tt)*) => (
-        ::ext::deriving::generic::ty::Path::new( pathvec![ $($x)* ] )
     )
 }
 
@@ -74,20 +68,6 @@ pub mod ord;
 
 pub mod generic;
 
-fn allow_unstable(cx: &mut ExtCtxt, span: Span, attr_name: &str) -> Span {
-    Span {
-        expn_id: cx.codemap().record_expansion(codemap::ExpnInfo {
-            call_site: span,
-            callee: codemap::NameAndSpan {
-                format: codemap::MacroAttribute(Symbol::intern(attr_name)),
-                span: Some(span),
-                allow_internal_unstable: true,
-            },
-        }),
-        ..span
-    }
-}
-
 macro_rules! derive_traits {
     ($( $name:expr => $func:path, )+) => {
         pub fn is_builtin_trait(name: ast::Name) -> bool {
@@ -99,7 +79,7 @@ macro_rules! derive_traits {
 
         pub fn register_builtin_derives(resolver: &mut Resolver) {
             $(
-                resolver.add_ext(
+                resolver.add_builtin(
                     ast::Ident::with_empty_ctxt(Symbol::intern($name)),
                     Rc::new(SyntaxExtension::BuiltinDerive($func))
                 );
@@ -177,15 +157,15 @@ fn call_intrinsic(cx: &ExtCtxt,
                   intrinsic: &str,
                   args: Vec<P<ast::Expr>>)
                   -> P<ast::Expr> {
-    span.expn_id = cx.codemap().record_expansion(codemap::ExpnInfo {
-        call_site: span,
-        callee: codemap::NameAndSpan {
-            format: codemap::MacroAttribute(Symbol::intern("derive")),
-            span: Some(span),
-            allow_internal_unstable: true,
-        },
-    });
-
+    if cx.current_expansion.mark.expn_info().unwrap().callee.allow_internal_unstable {
+        span = span.with_ctxt(cx.backtrace());
+    } else { // Avoid instability errors with user defined curstom derives, cc #36316
+        let mut info = cx.current_expansion.mark.expn_info().unwrap();
+        info.callee.allow_internal_unstable = true;
+        let mark = Mark::fresh(Mark::root());
+        mark.set_expn_info(info);
+        span = span.with_ctxt(SyntaxContext::empty().apply_mark(mark));
+    }
     let path = cx.std_path(&["intrinsics", intrinsic]);
     let call = cx.expr_call_global(span, path, args);
 
@@ -193,6 +173,6 @@ fn call_intrinsic(cx: &ExtCtxt,
         stmts: vec![cx.stmt_expr(call)],
         id: ast::DUMMY_NODE_ID,
         rules: ast::BlockCheckMode::Unsafe(ast::CompilerGenerated),
-        span: span,
+        span,
     }))
 }

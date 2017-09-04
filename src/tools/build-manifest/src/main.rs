@@ -9,9 +9,11 @@
 // except according to those terms.
 
 extern crate toml;
-extern crate rustc_serialize;
+#[macro_use]
+extern crate serde_derive;
+extern crate serde;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -45,6 +47,7 @@ static HOSTS: &'static [&'static str] = &[
 
 static TARGETS: &'static [&'static str] = &[
     "aarch64-apple-ios",
+    "aarch64-unknown-fuchsia",
     "aarch64-linux-android",
     "aarch64-unknown-linux-gnu",
     "arm-linux-androideabi",
@@ -80,15 +83,18 @@ static TARGETS: &'static [&'static str] = &[
     "s390x-unknown-linux-gnu",
     "sparc64-unknown-linux-gnu",
     "wasm32-unknown-emscripten",
+    "x86_64-linux-android",
     "x86_64-apple-darwin",
     "x86_64-apple-ios",
     "x86_64-pc-windows-gnu",
     "x86_64-pc-windows-msvc",
     "x86_64-rumprun-netbsd",
     "x86_64-unknown-freebsd",
+    "x86_64-unknown-fuchsia",
     "x86_64-unknown-linux-gnu",
     "x86_64-unknown-linux-musl",
     "x86_64-unknown-netbsd",
+    "x86_64-unknown-redox",
 ];
 
 static MINGW: &'static [&'static str] = &[
@@ -96,28 +102,46 @@ static MINGW: &'static [&'static str] = &[
     "x86_64-pc-windows-gnu",
 ];
 
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
 struct Manifest {
     manifest_version: String,
     date: String,
-    pkg: HashMap<String, Package>,
+    pkg: BTreeMap<String, Package>,
 }
 
-#[derive(RustcEncodable)]
+#[derive(Serialize)]
 struct Package {
     version: String,
-    target: HashMap<String, Target>,
+    target: BTreeMap<String, Target>,
 }
 
-#[derive(RustcEncodable)]
+#[derive(Serialize)]
 struct Target {
     available: bool,
     url: Option<String>,
     hash: Option<String>,
+    xz_url: Option<String>,
+    xz_hash: Option<String>,
     components: Option<Vec<Component>>,
     extensions: Option<Vec<Component>>,
 }
 
-#[derive(RustcEncodable)]
+impl Target {
+    fn unavailable() -> Target {
+        Target {
+            available: false,
+            url: None,
+            hash: None,
+            xz_url: None,
+            xz_hash: None,
+            components: None,
+            extensions: None,
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct Component {
     pkg: String,
     target: String,
@@ -131,15 +155,18 @@ macro_rules! t {
 }
 
 struct Builder {
-    channel: String,
+    rust_release: String,
+    cargo_release: String,
+    rls_release: String,
     input: PathBuf,
     output: PathBuf,
     gpg_passphrase: String,
-    digests: HashMap<String, String>,
+    digests: BTreeMap<String, String>,
     s3_address: String,
     date: String,
     rust_version: String,
     cargo_version: String,
+    rls_version: String,
 }
 
 fn main() {
@@ -147,21 +174,26 @@ fn main() {
     let input = PathBuf::from(args.next().unwrap());
     let output = PathBuf::from(args.next().unwrap());
     let date = args.next().unwrap();
-    let channel = args.next().unwrap();
+    let rust_release = args.next().unwrap();
+    let cargo_release = args.next().unwrap();
+    let rls_release = args.next().unwrap();
     let s3_address = args.next().unwrap();
     let mut passphrase = String::new();
     t!(io::stdin().read_to_string(&mut passphrase));
 
     Builder {
-        channel: channel,
-        input: input,
-        output: output,
+        rust_release,
+        cargo_release,
+        rls_release,
+        input,
+        output,
         gpg_passphrase: passphrase,
-        digests: HashMap::new(),
-        s3_address: s3_address,
-        date: date,
+        digests: BTreeMap::new(),
+        s3_address,
+        date,
         rust_version: String::new(),
         cargo_version: String::new(),
+        rls_version: String::new(),
     }.build();
 }
 
@@ -169,26 +201,19 @@ impl Builder {
     fn build(&mut self) {
         self.rust_version = self.version("rust", "x86_64-unknown-linux-gnu");
         self.cargo_version = self.version("cargo", "x86_64-unknown-linux-gnu");
+        self.rls_version = self.version("rls", "x86_64-unknown-linux-gnu");
 
         self.digest_and_sign();
-        let Manifest { manifest_version, date, pkg } = self.build_manifest();
+        let manifest = self.build_manifest();
+        let filename = format!("channel-rust-{}.toml", self.rust_release);
+        self.write_manifest(&toml::to_string(&manifest).unwrap(), &filename);
 
-        // Unfortunately we can't use derive(RustcEncodable) here because the
-        // version field is called `manifest-version`, not `manifest_version`.
-        // In lieu of that just create the table directly here with a `BTreeMap`
-        // and wrap it up in a `Value::Table`.
-        let mut manifest = BTreeMap::new();
-        manifest.insert("manifest-version".to_string(),
-                        toml::Value::String(manifest_version));
-        manifest.insert("date".to_string(), toml::Value::String(date));
-        manifest.insert("pkg".to_string(), toml::encode(&pkg));
-        let manifest = toml::Value::Table(manifest).to_string();
+        let filename = format!("channel-rust-{}-date.txt", self.rust_release);
+        self.write_date_stamp(&manifest.date, &filename);
 
-        let filename = format!("channel-rust-{}.toml", self.channel);
-        self.write_manifest(&manifest, &filename);
-
-        if self.channel != "beta" && self.channel != "nightly" {
-            self.write_manifest(&manifest, "channel-rust-stable.toml");
+        if self.rust_release != "beta" && self.rust_release != "nightly" {
+            self.write_manifest(&toml::to_string(&manifest).unwrap(), "channel-rust-stable.toml");
+            self.write_date_stamp(&manifest.date, "channel-rust-stable-date.txt");
         }
     }
 
@@ -205,7 +230,7 @@ impl Builder {
         let mut manifest = Manifest {
             manifest_version: "2".to_string(),
             date: self.date.to_string(),
-            pkg: HashMap::new(),
+            pkg: BTreeMap::new(),
         };
 
         self.package("rustc", &mut manifest.pkg, HOSTS);
@@ -214,35 +239,39 @@ impl Builder {
         self.package("rust-std", &mut manifest.pkg, TARGETS);
         self.package("rust-docs", &mut manifest.pkg, TARGETS);
         self.package("rust-src", &mut manifest.pkg, &["*"]);
+        let rls_package_name = if self.rust_release == "nightly" {
+            "rls"
+        } else {
+            "rls-preview"
+        };
+        self.package(rls_package_name, &mut manifest.pkg, HOSTS);
+        self.package("rust-analysis", &mut manifest.pkg, TARGETS);
 
         let mut pkg = Package {
             version: self.cached_version("rust").to_string(),
-            target: HashMap::new(),
+            target: BTreeMap::new(),
         };
         for host in HOSTS {
             let filename = self.filename("rust", host);
             let digest = match self.digests.remove(&filename) {
                 Some(digest) => digest,
                 None => {
-                    pkg.target.insert(host.to_string(), Target {
-                        available: false,
-                        url: None,
-                        hash: None,
-                        components: None,
-                        extensions: None,
-                    });
+                    pkg.target.insert(host.to_string(), Target::unavailable());
                     continue
                 }
             };
+            let xz_filename = filename.replace(".tar.gz", ".tar.xz");
+            let xz_digest = self.digests.remove(&xz_filename);
             let mut components = Vec::new();
             let mut extensions = Vec::new();
 
-            // rustc/rust-std/cargo are all required, and so is rust-mingw if it's
-            // available for the target.
+            // rustc/rust-std/cargo/docs are all required, and so is rust-mingw
+            // if it's available for the target.
             components.extend(vec![
                 Component { pkg: "rustc".to_string(), target: host.to_string() },
                 Component { pkg: "rust-std".to_string(), target: host.to_string() },
                 Component { pkg: "cargo".to_string(), target: host.to_string() },
+                Component { pkg: "rust-docs".to_string(), target: host.to_string() },
             ]);
             if host.contains("pc-windows-gnu") {
                 components.push(Component {
@@ -251,10 +280,12 @@ impl Builder {
                 });
             }
 
-            // Docs, other standard libraries, and the source package are all
-            // optional.
             extensions.push(Component {
-                pkg: "rust-docs".to_string(),
+                pkg: rls_package_name.to_string(),
+                target: host.to_string(),
+            });
+            extensions.push(Component {
+                pkg: "rust-analysis".to_string(),
                 target: host.to_string(),
             });
             for target in TARGETS {
@@ -272,8 +303,10 @@ impl Builder {
 
             pkg.target.insert(host.to_string(), Target {
                 available: true,
-                url: Some(self.url("rust", host)),
-                hash: Some(to_hex(digest.as_ref())),
+                url: Some(self.url(&filename)),
+                hash: Some(digest),
+                xz_url: xz_digest.as_ref().map(|_| self.url(&xz_filename)),
+                xz_hash: xz_digest,
                 components: Some(components),
                 extensions: Some(extensions),
             });
@@ -285,27 +318,23 @@ impl Builder {
 
     fn package(&mut self,
                pkgname: &str,
-               dst: &mut HashMap<String, Package>,
+               dst: &mut BTreeMap<String, Package>,
                targets: &[&str]) {
         let targets = targets.iter().map(|name| {
             let filename = self.filename(pkgname, name);
             let digest = match self.digests.remove(&filename) {
                 Some(digest) => digest,
-                None => {
-                    return (name.to_string(), Target {
-                        available: false,
-                        url: None,
-                        hash: None,
-                        components: None,
-                        extensions: None,
-                    })
-                }
+                None => return (name.to_string(), Target::unavailable()),
             };
+            let xz_filename = filename.replace(".tar.gz", ".tar.xz");
+            let xz_digest = self.digests.remove(&xz_filename);
 
             (name.to_string(), Target {
                 available: true,
-                url: Some(self.url(pkgname, name)),
+                url: Some(self.url(&filename)),
                 hash: Some(digest),
+                xz_url: xz_digest.as_ref().map(|_| self.url(&xz_filename)),
+                xz_hash: xz_digest,
                 components: None,
                 extensions: None,
             })
@@ -317,26 +346,30 @@ impl Builder {
         });
     }
 
-    fn url(&self, component: &str, target: &str) -> String {
+    fn url(&self, filename: &str) -> String {
         format!("{}/{}/{}",
                 self.s3_address,
                 self.date,
-                self.filename(component, target))
+                filename)
     }
 
     fn filename(&self, component: &str, target: &str) -> String {
         if component == "rust-src" {
-            format!("rust-src-{}.tar.gz", self.channel)
+            format!("rust-src-{}.tar.gz", self.rust_release)
         } else if component == "cargo" {
-            format!("cargo-nightly-{}.tar.gz", target)
+            format!("cargo-{}-{}.tar.gz", self.cargo_release, target)
+        } else if component == "rls" || component == "rls-preview" {
+            format!("rls-{}-{}.tar.gz", self.rls_release, target)
         } else {
-            format!("{}-{}-{}.tar.gz", component, self.channel, target)
+            format!("{}-{}-{}.tar.gz", component, self.rust_release, target)
         }
     }
 
     fn cached_version(&self, component: &str) -> &str {
         if component == "cargo" {
             &self.cargo_version
+        } else if component == "rls" || component == "rls-preview" {
+            &self.rls_version
         } else {
             &self.rust_version
         }
@@ -398,20 +431,11 @@ impl Builder {
         self.hash(&dst);
         self.sign(&dst);
     }
-}
 
-fn to_hex(digest: &[u8]) -> String {
-    let mut ret = String::new();
-    for byte in digest {
-        ret.push(hex((byte & 0xf0) >> 4));
-        ret.push(hex(byte & 0xf));
-    }
-    return ret;
-
-    fn hex(b: u8) -> char {
-        match b {
-            0...9 => (b'0' + b) as char,
-            _ => (b'a' + b - 10) as char,
-        }
+    fn write_date_stamp(&self, date: &str, name: &str) {
+        let dst = self.output.join(name);
+        t!(t!(File::create(&dst)).write_all(date.as_bytes()));
+        self.hash(&dst);
+        self.sign(&dst);
     }
 }

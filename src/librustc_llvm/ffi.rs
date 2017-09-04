@@ -49,10 +49,12 @@ pub enum CallConv {
     X86FastcallCallConv = 65,
     ArmAapcsCallConv = 67,
     Msp430Intr = 69,
+    X86_ThisCall = 70,
     PtxKernel = 71,
     X86_64_SysV = 78,
     X86_64_Win64 = 79,
     X86_VectorCall = 80,
+    X86_Intr = 83,
 }
 
 /// LLVMRustLinkage
@@ -283,10 +285,13 @@ pub enum CodeGenOptLevel {
 #[derive(Copy, Clone, PartialEq)]
 #[repr(C)]
 pub enum RelocMode {
-    Default = 0,
-    Static = 1,
-    PIC = 2,
-    DynamicNoPic = 3,
+    Default,
+    Static,
+    PIC,
+    DynamicNoPic,
+    ROPI,
+    RWPI,
+    ROPI_RWPI,
 }
 
 /// LLVMRustCodeModel
@@ -506,6 +511,7 @@ extern "C" {
 
     /// See Module::setModuleInlineAsm.
     pub fn LLVMSetModuleInlineAsm(M: ModuleRef, Asm: *const c_char);
+    pub fn LLVMRustAppendModuleInlineAsm(M: ModuleRef, Asm: *const c_char);
 
     /// See llvm::LLVMTypeKind::getTypeID.
     pub fn LLVMRustGetTypeKind(Ty: TypeRef) -> TypeKind;
@@ -585,12 +591,13 @@ extern "C" {
     pub fn LLVMIsUndef(Val: ValueRef) -> Bool;
 
     // Operations on metadata
+    pub fn LLVMMDStringInContext(C: ContextRef, Str: *const c_char, SLen: c_uint) -> ValueRef;
     pub fn LLVMMDNodeInContext(C: ContextRef, Vals: *const ValueRef, Count: c_uint) -> ValueRef;
+    pub fn LLVMAddNamedMetadataOperand(M: ModuleRef, Name: *const c_char, Val: ValueRef);
 
     // Operations on scalar constants
     pub fn LLVMConstInt(IntTy: TypeRef, N: c_ulonglong, SignExtend: Bool) -> ValueRef;
     pub fn LLVMConstIntOfArbitraryPrecision(IntTy: TypeRef, Wn: c_uint, Ws: *const u64) -> ValueRef;
-    pub fn LLVMConstReal(RealTy: TypeRef, N: f64) -> ValueRef;
     pub fn LLVMConstIntGetZExtValue(ConstantVal: ValueRef) -> c_ulonglong;
     pub fn LLVMConstIntGetSExtValue(ConstantVal: ValueRef) -> c_longlong;
     pub fn LLVMRustConstInt128Get(ConstantVal: ValueRef, SExt: bool,
@@ -690,6 +697,7 @@ extern "C" {
     pub fn LLVMIsGlobalConstant(GlobalVar: ValueRef) -> Bool;
     pub fn LLVMSetGlobalConstant(GlobalVar: ValueRef, IsConstant: Bool);
     pub fn LLVMRustGetNamedValue(M: ModuleRef, Name: *const c_char) -> ValueRef;
+    pub fn LLVMSetTailCall(CallInst: ValueRef, IsTailCall: Bool);
 
     // Operations on functions
     pub fn LLVMAddFunction(M: ModuleRef, Name: *const c_char, FunctionTy: TypeRef) -> ValueRef;
@@ -1326,6 +1334,8 @@ extern "C" {
 
     pub fn LLVMRustAddModuleFlag(M: ModuleRef, name: *const c_char, value: u32);
 
+    pub fn LLVMRustMetadataAsValue(C: ContextRef, MD: MetadataRef) -> ValueRef;
+
     pub fn LLVMRustDIBuilderCreate(M: ModuleRef) -> DIBuilderRef;
 
     pub fn LLVMRustDIBuilderDispose(Builder: DIBuilderRef);
@@ -1587,7 +1597,13 @@ extern "C" {
                                    Output: *const c_char,
                                    FileType: FileType)
                                    -> LLVMRustResult;
-    pub fn LLVMRustPrintModule(PM: PassManagerRef, M: ModuleRef, Output: *const c_char);
+    pub fn LLVMRustPrintModule(PM: PassManagerRef,
+                               M: ModuleRef,
+                               Output: *const c_char,
+                               Demangle: extern fn(*const c_char,
+                                                   size_t,
+                                                   *mut c_char,
+                                                   size_t) -> size_t);
     pub fn LLVMRustSetLLVMOptions(Argc: c_int, Argv: *const *const c_char);
     pub fn LLVMRustPrintPasses();
     pub fn LLVMRustSetNormalizedTarget(M: ModuleRef, triple: *const c_char);
@@ -1616,7 +1632,9 @@ extern "C" {
     pub fn LLVMRustUnpackOptimizationDiagnostic(DI: DiagnosticInfoRef,
                                                 pass_name_out: RustStringRef,
                                                 function_out: *mut ValueRef,
-                                                debugloc_out: *mut DebugLocRef,
+                                                loc_line_out: *mut c_uint,
+                                                loc_column_out: *mut c_uint,
+                                                loc_filename_out: RustStringRef,
                                                 message_out: RustStringRef);
     pub fn LLVMRustUnpackInlineAsmDiagnostic(DI: DiagnosticInfoRef,
                                              cookie_out: *mut c_uint,
@@ -1661,10 +1679,3 @@ extern "C" {
     pub fn LLVMRustUnsetComdat(V: ValueRef);
     pub fn LLVMRustSetModulePIELevel(M: ModuleRef);
 }
-
-
-// LLVM requires symbols from this library, but apparently they're not printed
-// during llvm-config?
-#[cfg(windows)]
-#[link(name = "ole32")]
-extern "C" {}

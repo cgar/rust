@@ -15,11 +15,12 @@
 // makes all other generics or inline functions that it references
 // reachable as well.
 
-use dep_graph::DepNode;
 use hir::map as hir_map;
 use hir::def::Def;
-use hir::def_id::DefId;
+use hir::def_id::{DefId, CrateNum};
+use std::rc::Rc;
 use ty::{self, TyCtxt};
+use ty::maps::Providers;
 use middle::privacy;
 use session::config;
 use util::nodemap::{NodeSet, FxHashSet};
@@ -28,6 +29,7 @@ use syntax::abi::Abi;
 use syntax::ast;
 use syntax::attr;
 use hir;
+use hir::def_id::LOCAL_CRATE;
 use hir::intravisit::{Visitor, NestedVisitorMap};
 use hir::itemlikevisit::ItemLikeVisitor;
 use hir::intravisit;
@@ -47,7 +49,7 @@ fn item_might_be_inlined(item: &hir::Item) -> bool {
     }
 
     match item.node {
-        hir::ItemImpl(_, _, ref generics, ..) |
+        hir::ItemImpl(_, _, _, ref generics, ..) |
         hir::ItemFn(.., ref generics, _) => {
             generics_require_inlining(generics)
         }
@@ -105,12 +107,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ReachableContext<'a, 'tcx> {
     fn visit_expr(&mut self, expr: &'tcx hir::Expr) {
         let def = match expr.node {
             hir::ExprPath(ref qpath) => {
-                Some(self.tables.qpath_def(qpath, expr.id))
+                Some(self.tables.qpath_def(qpath, expr.hir_id))
             }
             hir::ExprMethodCall(..) => {
-                let method_call = ty::MethodCall::expr(expr.id);
-                let def_id = self.tables.method_map[&method_call].def_id;
-                Some(Def::Method(def_id))
+                Some(self.tables.type_dependent_defs()[expr.hir_id])
             }
             _ => None
         };
@@ -183,7 +183,7 @@ impl<'a, 'tcx> ReachableContext<'a, 'tcx> {
                             // does too.
                             let impl_node_id = self.tcx.hir.as_local_node_id(impl_did).unwrap();
                             match self.tcx.hir.expect_item(impl_node_id).node {
-                                hir::ItemImpl(_, _, ref generics, ..) => {
+                                hir::ItemImpl(_, _, _, ref generics, ..) => {
                                     generics_require_inlining(generics)
                                 }
                                 _ => false
@@ -265,7 +265,8 @@ impl<'a, 'tcx> ReachableContext<'a, 'tcx> {
                     hir::ItemMod(..) | hir::ItemForeignMod(..) |
                     hir::ItemImpl(..) | hir::ItemTrait(..) |
                     hir::ItemStruct(..) | hir::ItemEnum(..) |
-                    hir::ItemUnion(..) | hir::ItemDefaultImpl(..) => {}
+                    hir::ItemUnion(..) | hir::ItemDefaultImpl(..) |
+                    hir::ItemGlobalAsm(..) => {}
                 }
             }
             hir_map::NodeTraitItem(trait_method) => {
@@ -294,6 +295,9 @@ impl<'a, 'tcx> ReachableContext<'a, 'tcx> {
                     }
                     hir::ImplItemKind::Type(_) => {}
                 }
+            }
+            hir_map::NodeExpr(&hir::Expr { node: hir::ExprClosure(.., body, _, _), .. }) => {
+                self.visit_nested_body(body);
             }
             // Nothing to recurse on for these
             hir_map::NodeForeignItem(_) |
@@ -359,21 +363,25 @@ impl<'a, 'tcx: 'a> ItemLikeVisitor<'tcx> for CollectPrivateImplItemsVisitor<'a, 
     }
 }
 
-pub fn find_reachable<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                access_levels: &privacy::AccessLevels)
-                                -> NodeSet {
-    let _task = tcx.dep_graph.in_task(DepNode::Reachability);
+pub fn find_reachable<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) -> Rc<NodeSet> {
+    tcx.reachable_set(LOCAL_CRATE)
+}
+
+fn reachable_set<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, crate_num: CrateNum) -> Rc<NodeSet> {
+    debug_assert!(crate_num == LOCAL_CRATE);
+
+    let access_levels = &tcx.privacy_access_levels(LOCAL_CRATE);
 
     let any_library = tcx.sess.crate_types.borrow().iter().any(|ty| {
         *ty == config::CrateTypeRlib || *ty == config::CrateTypeDylib ||
         *ty == config::CrateTypeProcMacro
     });
     let mut reachable_context = ReachableContext {
-        tcx: tcx,
-        tables: &ty::TypeckTables::empty(),
+        tcx,
+        tables: &ty::TypeckTables::empty(None),
         reachable_symbols: NodeSet(),
         worklist: Vec::new(),
-        any_library: any_library,
+        any_library,
     };
 
     // Step 1: Seed the worklist with all nodes which were found to be public as
@@ -393,8 +401,8 @@ pub fn find_reachable<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     }
     {
         let mut collect_private_impl_items = CollectPrivateImplItemsVisitor {
-            tcx: tcx,
-            access_levels: access_levels,
+            tcx,
+            access_levels,
             worklist: &mut reachable_context.worklist,
         };
         tcx.hir.krate().visit_all_item_likes(&mut collect_private_impl_items);
@@ -404,5 +412,12 @@ pub fn find_reachable<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     reachable_context.propagate();
 
     // Return the set of reachable symbols.
-    reachable_context.reachable_symbols
+    Rc::new(reachable_context.reachable_symbols)
+}
+
+pub fn provide(providers: &mut Providers) {
+    *providers = Providers {
+        reachable_set,
+        ..*providers
+    };
 }

@@ -132,7 +132,6 @@
 //! use std::cell::Cell;
 //! use std::ptr::Shared;
 //! use std::intrinsics::abort;
-//! use std::intrinsics::assume;
 //!
 //! struct Rc<T: ?Sized> {
 //!     ptr: Shared<RcBox<T>>
@@ -171,8 +170,7 @@
 //! impl<T: ?Sized> RcBoxPtr<T> for Rc<T> {
 //!    fn inner(&self) -> &RcBox<T> {
 //!        unsafe {
-//!            assume(!(*(&self.ptr as *const _ as *const *const ())).is_null());
-//!            &(**self.ptr)
+//!            self.ptr.as_ref()
 //!        }
 //!    }
 //! }
@@ -189,6 +187,34 @@ use ops::{Deref, DerefMut, CoerceUnsized};
 use ptr;
 
 /// A mutable memory location.
+///
+/// # Examples
+///
+/// Here you can see how using `Cell<T>` allows to use mutable field inside
+/// immutable struct (which is also called 'interior mutability').
+///
+/// ```
+/// use std::cell::Cell;
+///
+/// struct SomeStruct {
+///     regular_field: u8,
+///     special_field: Cell<u8>,
+/// }
+///
+/// let my_struct = SomeStruct {
+///     regular_field: 0,
+///     special_field: Cell::new(1),
+/// };
+///
+/// let new_value = 100;
+///
+/// // ERROR, because my_struct is immutable
+/// // my_struct.regular_field = new_value;
+///
+/// // WORKS, although `my_struct` is immutable, field `special_field` is mutable because it is Cell
+/// my_struct.special_field.set(new_value);
+/// assert_eq!(my_struct.special_field.get(), new_value);
+/// ```
 ///
 /// See the [module-level documentation](index.html) for more.
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -310,26 +336,6 @@ impl<T> Cell<T> {
         }
     }
 
-    /// Returns a reference to the underlying `UnsafeCell`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// #![feature(as_unsafe_cell)]
-    ///
-    /// use std::cell::Cell;
-    ///
-    /// let c = Cell::new(5);
-    ///
-    /// let uc = c.as_unsafe_cell();
-    /// ```
-    #[inline]
-    #[unstable(feature = "as_unsafe_cell", issue = "27708")]
-    #[rustc_deprecated(since = "1.12.0", reason = "renamed to as_ptr")]
-    pub fn as_unsafe_cell(&self) -> &UnsafeCell<T> {
-        &self.value
-    }
-
     /// Returns a raw pointer to the underlying data in this cell.
     ///
     /// # Examples
@@ -394,7 +400,6 @@ impl<T> Cell<T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(move_cell)]
     /// use std::cell::Cell;
     ///
     /// let c1 = Cell::new(5i32);
@@ -404,7 +409,7 @@ impl<T> Cell<T> {
     /// assert_eq!(5, c2.get());
     /// ```
     #[inline]
-    #[unstable(feature = "move_cell", issue = "39264")]
+    #[stable(feature = "move_cell", since = "1.17.0")]
     pub fn swap(&self, other: &Self) {
         if ptr::eq(self, other) {
             return;
@@ -414,20 +419,19 @@ impl<T> Cell<T> {
         }
     }
 
-    /// Replaces the contained value.
+    /// Replaces the contained value, and returns it.
     ///
     /// # Examples
     ///
     /// ```
-    /// #![feature(move_cell)]
     /// use std::cell::Cell;
     ///
-    /// let c = Cell::new(5);
-    /// let old = c.replace(10);
-    ///
-    /// assert_eq!(5, old);
+    /// let cell = Cell::new(5);
+    /// assert_eq!(cell.get(), 5);
+    /// assert_eq!(cell.replace(10), 5);
+    /// assert_eq!(cell.get(), 10);
     /// ```
-    #[unstable(feature = "move_cell", issue = "39264")]
+    #[stable(feature = "move_cell", since = "1.17.0")]
     pub fn replace(&self, val: T) -> T {
         mem::replace(unsafe { &mut *self.value.get() }, val)
     }
@@ -437,7 +441,6 @@ impl<T> Cell<T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(move_cell)]
     /// use std::cell::Cell;
     ///
     /// let c = Cell::new(5);
@@ -445,7 +448,7 @@ impl<T> Cell<T> {
     ///
     /// assert_eq!(five, 5);
     /// ```
-    #[unstable(feature = "move_cell", issue = "39264")]
+    #[stable(feature = "move_cell", since = "1.17.0")]
     pub fn into_inner(self) -> T {
         unsafe { self.value.into_inner() }
     }
@@ -457,7 +460,6 @@ impl<T: Default> Cell<T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(move_cell)]
     /// use std::cell::Cell;
     ///
     /// let c = Cell::new(5);
@@ -466,7 +468,7 @@ impl<T: Default> Cell<T> {
     /// assert_eq!(five, 5);
     /// assert_eq!(c.into_inner(), 0);
     /// ```
-    #[unstable(feature = "move_cell", issue = "39264")]
+    #[stable(feature = "move_cell", since = "1.17.0")]
     pub fn take(&self) -> T {
         self.replace(Default::default())
     }
@@ -482,20 +484,6 @@ impl<T: CoerceUnsized<U>, U> CoerceUnsized<Cell<U>> for Cell<T> {}
 pub struct RefCell<T: ?Sized> {
     borrow: Cell<BorrowFlag>,
     value: UnsafeCell<T>,
-}
-
-/// An enumeration of values returned from the `state` method on a `RefCell<T>`.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-#[unstable(feature = "borrow_state", issue = "27733")]
-#[rustc_deprecated(since = "1.15.0", reason = "use `try_borrow` instead")]
-#[allow(deprecated)]
-pub enum BorrowState {
-    /// The cell is currently being read, there is at least one active `borrow`.
-    Reading,
-    /// The cell is currently being written to, there is an active `borrow_mut`.
-    Writing,
-    /// There are no outstanding borrows on this cell.
-    Unused,
 }
 
 /// An error returned by [`RefCell::try_borrow`](struct.RefCell.html#method.try_borrow).
@@ -583,41 +571,62 @@ impl<T> RefCell<T> {
         debug_assert!(self.borrow.get() == UNUSED);
         unsafe { self.value.into_inner() }
     }
-}
 
-impl<T: ?Sized> RefCell<T> {
-    /// Query the current state of this `RefCell`
+    /// Replaces the wrapped value with a new one, returning the old value,
+    /// without deinitializing either one.
     ///
-    /// The returned value can be dispatched on to determine if a call to
-    /// `borrow` or `borrow_mut` would succeed.
+    /// This function corresponds to [`std::mem::replace`](../mem/fn.replace.html).
     ///
     /// # Examples
     ///
     /// ```
-    /// #![feature(borrow_state)]
-    ///
-    /// use std::cell::{BorrowState, RefCell};
-    ///
+    /// #![feature(refcell_replace_swap)]
+    /// use std::cell::RefCell;
     /// let c = RefCell::new(5);
-    ///
-    /// match c.borrow_state() {
-    ///     BorrowState::Writing => println!("Cannot be borrowed"),
-    ///     BorrowState::Reading => println!("Cannot be borrowed mutably"),
-    ///     BorrowState::Unused => println!("Can be borrowed (mutably as well)"),
-    /// }
+    /// let u = c.replace(6);
+    /// assert_eq!(u, 5);
+    /// assert_eq!(c, RefCell::new(6));
     /// ```
-    #[unstable(feature = "borrow_state", issue = "27733")]
-    #[rustc_deprecated(since = "1.15.0", reason = "use `try_borrow` instead")]
-    #[allow(deprecated)]
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the `RefCell` has any outstanding borrows,
+    /// whether or not they are full mutable borrows.
     #[inline]
-    pub fn borrow_state(&self) -> BorrowState {
-        match self.borrow.get() {
-            WRITING => BorrowState::Writing,
-            UNUSED => BorrowState::Unused,
-            _ => BorrowState::Reading,
-        }
+    #[unstable(feature = "refcell_replace_swap", issue="43570")]
+    pub fn replace(&self, t: T) -> T {
+        mem::replace(&mut *self.borrow_mut(), t)
     }
 
+    /// Swaps the wrapped value of `self` with the wrapped value of `other`,
+    /// without deinitializing either one.
+    ///
+    /// This function corresponds to [`std::mem::swap`](../mem/fn.swap.html).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(refcell_replace_swap)]
+    /// use std::cell::RefCell;
+    /// let c = RefCell::new(5);
+    /// let d = RefCell::new(6);
+    /// c.swap(&d);
+    /// assert_eq!(c, RefCell::new(6));
+    /// assert_eq!(d, RefCell::new(5));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if either `RefCell` has any outstanding borrows,
+    /// whether or not they are full mutable borrows.
+    #[inline]
+    #[unstable(feature = "refcell_replace_swap", issue="43570")]
+    pub fn swap(&self, other: &Self) {
+        mem::swap(&mut *self.borrow_mut(), &mut *other.borrow_mut())
+    }
+}
+
+impl<T: ?Sized> RefCell<T> {
     /// Immutably borrows the wrapped value.
     ///
     /// The borrow lasts until the returned `Ref` exits scope. Multiple
@@ -773,29 +782,6 @@ impl<T: ?Sized> RefCell<T> {
         }
     }
 
-    /// Returns a reference to the underlying `UnsafeCell`.
-    ///
-    /// This can be used to circumvent `RefCell`'s safety checks.
-    ///
-    /// This function is `unsafe` because `UnsafeCell`'s field is public.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// #![feature(as_unsafe_cell)]
-    ///
-    /// use std::cell::RefCell;
-    ///
-    /// let c = RefCell::new(5);
-    /// let c = unsafe { c.as_unsafe_cell() };
-    /// ```
-    #[inline]
-    #[unstable(feature = "as_unsafe_cell", issue = "27708")]
-    #[rustc_deprecated(since = "1.12.0", reason = "renamed to as_ptr")]
-    pub unsafe fn as_unsafe_cell(&self) -> &UnsafeCell<T> {
-        &self.value
-    }
-
     /// Returns a raw pointer to the underlying data in this cell.
     ///
     /// # Examples
@@ -817,6 +803,15 @@ impl<T: ?Sized> RefCell<T> {
     ///
     /// This call borrows `RefCell` mutably (at compile-time) so there is no
     /// need for dynamic checks.
+    ///
+    /// However be cautious: this method expects `self` to be mutable, which is
+    /// generally not the case when using a `RefCell`. Take a look at the
+    /// [`borrow_mut`] method instead if `self` isn't mutable.
+    ///
+    /// Also, please be aware that this method is only for special circumstances and is usually
+    /// not what you want. In case of doubt, use [`borrow_mut`] instead.
+    ///
+    /// [`borrow_mut`]: #method.borrow_mut
     ///
     /// # Examples
     ///
@@ -1003,7 +998,7 @@ impl<'b, T: ?Sized> Ref<'b, T> {
     /// A method would interfere with methods of the same name on the contents
     /// of a `RefCell` used through `Deref`.
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```
     /// use std::cell::{RefCell, Ref};
@@ -1028,6 +1023,13 @@ impl<'b, T: ?Sized> Ref<'b, T> {
 #[unstable(feature = "coerce_unsized", issue = "27732")]
 impl<'b, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<Ref<'b, U>> for Ref<'b, T> {}
 
+#[stable(feature = "std_guard_impls", since = "1.20.0")]
+impl<'a, T: ?Sized + fmt::Display> fmt::Display for Ref<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
 impl<'b, T: ?Sized> RefMut<'b, T> {
     /// Make a new `RefMut` for a component of the borrowed data, e.g. an enum
     /// variant.
@@ -1038,7 +1040,7 @@ impl<'b, T: ?Sized> RefMut<'b, T> {
     /// `RefMut::map(...)`.  A method would interfere with methods of the same
     /// name on the contents of a `RefCell` used through `Deref`.
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```
     /// use std::cell::{RefCell, RefMut};
@@ -1119,6 +1121,13 @@ impl<'b, T: ?Sized> DerefMut for RefMut<'b, T> {
 
 #[unstable(feature = "coerce_unsized", issue = "27732")]
 impl<'b, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<RefMut<'b, U>> for RefMut<'b, T> {}
+
+#[stable(feature = "std_guard_impls", since = "1.20.0")]
+impl<'a, T: ?Sized + fmt::Display> fmt::Display for RefMut<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.value.fmt(f)
+    }
+}
 
 /// The core primitive for interior mutability in Rust.
 ///
@@ -1231,7 +1240,7 @@ impl<T: ?Sized> UnsafeCell<T> {
     }
 }
 
-#[stable(feature = "unsafe_cell_default", since = "1.9.0")]
+#[stable(feature = "unsafe_cell_default", since = "1.10.0")]
 impl<T: Default> Default for UnsafeCell<T> {
     /// Creates an `UnsafeCell`, with the `Default` value for T.
     fn default() -> UnsafeCell<T> {

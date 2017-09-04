@@ -18,6 +18,7 @@
 //! * No CR characters
 //! * No `TODO` or `XXX` directives
 //! * A valid license header is at the top
+//! * No unexplained ` ```ignore ` or ` ```rust,ignore ` doc tests
 //!
 //! A number of these checks can be opted-out of with various directives like
 //! `// ignore-tidy-linelength`.
@@ -37,6 +38,17 @@ http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
 <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 option. This file may not be copied, modified, or distributed
 except according to those terms.";
+
+const UNEXPLAINED_IGNORE_DOCTEST_INFO: &str = r#"unexplained "```ignore" doctest; try one:
+
+* make the test actually pass, by adding necessary imports and declarations, or
+* use "```text", if the code is not Rust code, or
+* use "```compile_fail,Ennnn", if the code is expected to fail at compile time, or
+* use "```should_panic", if the code is expected to fail at run time, or
+* use "```no_run", if the code should type-check but not necessary linkable/runnable, or
+* explain it like "```ignore (cannot-test-this-because-xxxx)", if the annotation cannot be avoided.
+
+"#;
 
 /// Parser states for line_is_url.
 #[derive(PartialEq)]
@@ -71,7 +83,7 @@ fn line_is_url(line: &str) -> bool {
                 => state = EXP_END,
 
             (EXP_URL, w)
-                if w.starts_with("http://") || w.starts_with("https://")
+                if w.starts_with("http://") || w.starts_with("https://") || w.starts_with("../")
                 => state = EXP_END,
 
             (_, _) => return false,
@@ -101,19 +113,21 @@ pub fn check(path: &Path, bad: &mut bool) {
            filename.starts_with(".#") {
             return
         }
-        if filename == "miniz.c" || filename.contains("jquery") {
-            return
-        }
 
         contents.truncate(0);
         t!(t!(File::open(file), file).read_to_string(&mut contents));
+
+        if contents.is_empty() {
+            tidy_error!(bad, "{}: empty file", file.display());
+        }
+
         let skip_cr = contents.contains("ignore-tidy-cr");
         let skip_tab = contents.contains("ignore-tidy-tab");
         let skip_length = contents.contains("ignore-tidy-linelength");
+        let skip_end_whitespace = contents.contains("ignore-tidy-end-whitespace");
         for (i, line) in contents.split("\n").enumerate() {
             let mut err = |msg: &str| {
-                println!("{}:{}: {}", file.display(), i + 1, msg);
-                *bad = true;
+                tidy_error!(bad, "{}:{}: {}", file.display(), i + 1, msg);
             };
             if !skip_length && line.chars().count() > COLS
                 && !long_line_is_ok(line) {
@@ -122,7 +136,7 @@ pub fn check(path: &Path, bad: &mut bool) {
             if line.contains("\t") && !skip_tab {
                 err("tab character");
             }
-            if line.ends_with(" ") || line.ends_with("\t") {
+            if !skip_end_whitespace && (line.ends_with(" ") || line.ends_with("\t")) {
                 err("trailing whitespace");
             }
             if line.contains("\r") && !skip_cr {
@@ -136,10 +150,12 @@ pub fn check(path: &Path, bad: &mut bool) {
                     err("XXX is deprecated; use FIXME")
                 }
             }
+            if line.ends_with("```ignore") || line.ends_with("```rust,ignore") {
+                err(UNEXPLAINED_IGNORE_DOCTEST_INFO);
+            }
         }
         if !licenseck(file, &contents) {
-            println!("{}: incorrect license", file.display());
-            *bad = true;
+            tidy_error!(bad, "{}: incorrect license", file.display());
         }
     })
 }
@@ -165,8 +181,10 @@ fn licenseck(file: &Path, contents: &str) -> bool {
     lines.windows(LICENSE.lines().count()).any(|window| {
         let offset = if window.iter().all(|w| w.starts_with("//")) {
             2
-        } else if window.iter().all(|w| w.starts_with("#")) {
+        } else if window.iter().all(|w| w.starts_with('#')) {
             1
+        } else if window.iter().all(|w| w.starts_with(" *")) {
+            2
         } else {
             return false
         };

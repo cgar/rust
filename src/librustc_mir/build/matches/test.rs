@@ -20,7 +20,7 @@ use build::matches::{Candidate, MatchPair, Test, TestKind};
 use hair::*;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::bitvec::BitVector;
-use rustc::middle::const_val::{ConstVal, ConstInt};
+use rustc::middle::const_val::ConstVal;
 use rustc::ty::{self, Ty};
 use rustc::ty::util::IntTypeExt;
 use rustc::mir::*;
@@ -112,8 +112,8 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                                      test_lvalue: &Lvalue<'tcx>,
                                      candidate: &Candidate<'pat, 'tcx>,
                                      switch_ty: Ty<'tcx>,
-                                     options: &mut Vec<ConstVal>,
-                                     indices: &mut FxHashMap<ConstVal, usize>)
+                                     options: &mut Vec<ConstVal<'tcx>>,
+                                     indices: &mut FxHashMap<ConstVal<'tcx>, usize>)
                                      -> bool
     {
         let match_pair = match candidate.match_pairs.iter().find(|mp| mp.lvalue == *test_lvalue) {
@@ -191,11 +191,8 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 let mut targets = Vec::with_capacity(used_variants + 1);
                 let mut values = Vec::with_capacity(used_variants);
                 let tcx = self.hir.tcx();
-                for (idx, variant) in adt_def.variants.iter().enumerate() {
+                for (idx, discr) in adt_def.discriminants(tcx).enumerate() {
                     target_blocks.place_back() <- if variants.contains(idx) {
-                        let discr = ConstInt::new_inttype(variant.disr_val, adt_def.discr_ty,
-                                                          tcx.sess.target.uint_type,
-                                                          tcx.sess.target.int_type).unwrap();
                         values.push(discr);
                         *(targets.place_back() <- self.cfg.start_new_block())
                     } else {
@@ -212,8 +209,8 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 }
                 debug!("num_enum_variants: {}, tested variants: {:?}, variants: {:?}",
                        num_enum_variants, values, variants);
-                let discr_ty = adt_def.discr_ty.to_ty(tcx);
-                let discr = self.temp(discr_ty);
+                let discr_ty = adt_def.repr.discr_type().to_ty(tcx);
+                let discr = self.temp(discr_ty, test.span);
                 self.cfg.push_assign(block, source_info, &discr,
                                      Rvalue::Discriminant(lvalue.clone()));
                 assert_eq!(values.len() + 1, targets.len());
@@ -221,7 +218,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     discr: Operand::Consume(discr),
                     switch_ty: discr_ty,
                     values: From::from(values),
-                    targets: targets
+                    targets,
                 });
                 target_blocks
             }
@@ -252,9 +249,9 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     ).collect();
                     (targets.clone(), TerminatorKind::SwitchInt {
                         discr: Operand::Consume(lvalue.clone()),
-                        switch_ty: switch_ty,
+                        switch_ty,
                         values: From::from(values),
-                        targets: targets,
+                        targets,
                     })
                 };
                 self.cfg.terminate(block, source_info, terminator);
@@ -273,7 +270,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     if let ty::TyRef(region, mt) = ty.sty {
                         if let ty::TyArray(_, _) = mt.ty.sty {
                             ty = tcx.mk_imm_ref(region, tcx.mk_slice(tcx.types.u8));
-                            let val_slice = self.temp(ty);
+                            let val_slice = self.temp(ty, test.span);
                             self.cfg.push_assign(block, source_info, &val_slice,
                                                  Rvalue::Cast(CastKind::Unsize, val, ty));
                             val = Operand::Consume(val_slice);
@@ -283,12 +280,12 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     assert!(ty.is_slice());
 
                     let array_ty = tcx.mk_array(tcx.types.u8, bytes.len());
-                    let array_ref = tcx.mk_imm_ref(tcx.mk_region(ty::ReStatic), array_ty);
+                    let array_ref = tcx.mk_imm_ref(tcx.types.re_static, array_ty);
                     let array = self.literal_operand(test.span, array_ref, Literal::Value {
                         value: value.clone()
                     });
 
-                    let slice = self.temp(ty);
+                    let slice = self.temp(ty, test.span);
                     self.cfg.push_assign(block, source_info, &slice,
                                          Rvalue::Cast(CastKind::Unsize, array, ty));
                     Operand::Consume(slice)
@@ -307,18 +304,18 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     let (mty, method) = self.hir.trait_method(eq_def_id, "eq", ty, &[ty]);
 
                     let bool_ty = self.hir.bool_ty();
-                    let eq_result = self.temp(bool_ty);
+                    let eq_result = self.temp(bool_ty, test.span);
                     let eq_block = self.cfg.start_new_block();
                     let cleanup = self.diverge_cleanup();
                     self.cfg.terminate(block, source_info, TerminatorKind::Call {
-                        func: Operand::Constant(Constant {
+                        func: Operand::Constant(box Constant {
                             span: test.span,
                             ty: mty,
                             literal: method
                         }),
                         args: vec![val, expect],
                         destination: Some((eq_result.clone(), eq_block)),
-                        cleanup: cleanup,
+                        cleanup,
                     });
 
                     // check the result
@@ -352,7 +349,8 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
 
             TestKind::Len { len, op } => {
                 let (usize_ty, bool_ty) = (self.hir.usize_ty(), self.hir.bool_ty());
-                let (actual, result) = (self.temp(usize_ty), self.temp(bool_ty));
+                let (actual, result) = (self.temp(usize_ty, test.span),
+                                        self.temp(bool_ty, test.span));
 
                 // actual = len(lvalue)
                 self.cfg.push_assign(block, source_info,
@@ -386,7 +384,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                left: Operand<'tcx>,
                right: Operand<'tcx>) -> BasicBlock {
         let bool_ty = self.hir.bool_ty();
-        let result = self.temp(bool_ty);
+        let result = self.temp(bool_ty, span);
 
         // result = op(left, right)
         let source_info = self.source_info(span);

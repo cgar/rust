@@ -77,7 +77,7 @@ pub fn strip_doc_comment_decoration(comment: &str) -> String {
         while j > i && lines[j - 1].trim().is_empty() {
             j -= 1;
         }
-        lines[i..j].iter().cloned().collect()
+        lines[i..j].to_vec()
     }
 
     /// remove a "[ \t]*\*" block from each line, if possible
@@ -192,7 +192,7 @@ fn read_line_comments(rdr: &mut StringReader,
     if !lines.is_empty() {
         comments.push(Comment {
             style: if code_to_the_left { Trailing } else { Isolated },
-            lines: lines,
+            lines,
             pos: p,
         });
     }
@@ -306,8 +306,8 @@ fn read_block_comment(rdr: &mut StringReader,
     }
     debug!("<<< block comment");
     comments.push(Comment {
-        style: style,
-        lines: lines,
+        style,
+        lines,
         pos: p,
     });
 }
@@ -348,8 +348,8 @@ pub fn gather_comments_and_literals(sess: &ParseSess, path: String, srdr: &mut R
     let mut src = Vec::new();
     srdr.read_to_end(&mut src).unwrap();
     let src = String::from_utf8(src).unwrap();
-    let cm = CodeMap::new();
-    let filemap = cm.new_filemap(path, None, src);
+    let cm = CodeMap::new(sess.codemap().path_mapping().clone());
+    let filemap = cm.new_filemap(path, src);
     let mut rdr = lexer::StringReader::new_raw(sess, filemap);
 
     let mut comments: Vec<Comment> = Vec::new();
@@ -386,7 +386,7 @@ pub fn gather_comments_and_literals(sess: &ParseSess, path: String, srdr: &mut R
                 debug!("tok lit: {}", s);
                 literals.push(Literal {
                     lit: s.to_string(),
-                    pos: sp.lo,
+                    pos: sp.lo(),
                 });
             })
         } else {
